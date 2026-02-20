@@ -18,7 +18,7 @@ interface ClockResult {
 }
 
 export default function HomePage() {
-  const [appState, setAppState] = useState<AppState>('loading');
+  const [appState, setAppState] = useState<AppState>('needs_permission');
   const [geoError, setGeoError] = useState<string>('');
   const [position, setPosition] = useState<GeoPosition | null>(null);
   const [staffCode, setStaffCode] = useState('');
@@ -34,29 +34,6 @@ export default function HomePage() {
     const saved = localStorage.getItem('smokeys_lang') as Lang | null;
     if (saved === 'en' || saved === 'es') setLang(saved);
   }, []);
-
-  // On mount, check if permission is already granted
-  useEffect(() => {
-    checkPermissionAndRequest();
-  }, []);
-
-  async function checkPermissionAndRequest() {
-    // Use Permissions API to check if geolocation is already granted
-    if ('permissions' in navigator) {
-      try {
-        const status = await navigator.permissions.query({ name: 'geolocation' });
-        if (status.state === 'granted') {
-          // Already have permission — request automatically
-          requestLocation();
-          return;
-        }
-      } catch {
-        // Permissions API not supported — fall through to manual prompt
-      }
-    }
-    // Permission not yet granted — show the "enable location" screen
-    setAppState('needs_permission');
-  }
 
   async function requestLocation() {
     setAppState('loading');
