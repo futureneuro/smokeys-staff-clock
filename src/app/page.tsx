@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { EDGE_FUNCTION_URL } from '@/lib/supabase';
-import { getCurrentPosition, GeoPosition } from '@/lib/geo';
+import { EDGE_FUNCTION_URL, supabase } from '@/lib/supabase';
+import { getCurrentPosition, GeoPosition, haversineDistance } from '@/lib/geo';
+import { Lang, t, formatDistance, formatTimeMedellin } from '@/lib/i18n';
 
-type AppState = 'loading' | 'location_error' | 'ready' | 'submitting' | 'success';
+type AppState = 'needs_permission' | 'loading' | 'location_error' | 'ready' | 'submitting' | 'success';
 type ActionType = 'check_in' | 'check_out';
 
 interface ClockResult {
@@ -24,10 +25,38 @@ export default function HomePage() {
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
   const [result, setResult] = useState<ClockResult | null>(null);
+  const [distanceKm, setDistanceKm] = useState<number | null>(null);
+  const [radiusKm, setRadiusKm] = useState<number>(0.1);
+  const [lang, setLang] = useState<Lang>('es');
 
+  // Load saved language preference
   useEffect(() => {
-    requestLocation();
+    const saved = localStorage.getItem('smokeys_lang') as Lang | null;
+    if (saved === 'en' || saved === 'es') setLang(saved);
   }, []);
+
+  // On mount, check if permission is already granted
+  useEffect(() => {
+    checkPermissionAndRequest();
+  }, []);
+
+  async function checkPermissionAndRequest() {
+    // Use Permissions API to check if geolocation is already granted
+    if ('permissions' in navigator) {
+      try {
+        const status = await navigator.permissions.query({ name: 'geolocation' });
+        if (status.state === 'granted') {
+          // Already have permission — request automatically
+          requestLocation();
+          return;
+        }
+      } catch {
+        // Permissions API not supported — fall through to manual prompt
+      }
+    }
+    // Permission not yet granted — show the "enable location" screen
+    setAppState('needs_permission');
+  }
 
   async function requestLocation() {
     setAppState('loading');
@@ -35,6 +64,34 @@ export default function HomePage() {
     try {
       const pos = await getCurrentPosition();
       setPosition(pos);
+
+      const { data: settings } = await supabase
+        .from('settings')
+        .select('restaurant_lat, restaurant_lng, radius_meters')
+        .limit(1)
+        .single();
+
+      if (settings?.restaurant_lat && settings?.restaurant_lng) {
+        const restaurant: GeoPosition = {
+          lat: settings.restaurant_lat,
+          lng: settings.restaurant_lng,
+        };
+        const rKm = (settings.radius_meters || 100) / 1000;
+        setRadiusKm(rKm);
+        const dist = haversineDistance(pos, restaurant);
+        setDistanceKm(dist);
+
+        if (dist > rKm) {
+          setGeoError(
+            t(lang, 'distError', {
+              dist: formatDistance(dist, lang),
+              radius: formatDistance(rKm, lang),
+            })
+          );
+          setAppState('location_error');
+          return;
+        }
+      }
       setAppState('ready');
     } catch (err: unknown) {
       setGeoError(err instanceof Error ? err.message : 'Failed to get location');
@@ -44,11 +101,11 @@ export default function HomePage() {
 
   async function handleClock(action: ActionType) {
     if (!staffCode.trim() || !pin.trim()) {
-      setError('Please enter your Staff ID and PIN.');
+      setError(t(lang, 'enterBoth'));
       return;
     }
     if (!position) {
-      setError('Location not available. Please refresh and allow location access.');
+      setError(t(lang, 'noLocation'));
       return;
     }
 
@@ -79,7 +136,7 @@ export default function HomePage() {
       setResult(data);
       setAppState('success');
     } catch {
-      setError('Network error. Please check your connection and try again.');
+      setError(t(lang, 'networkError'));
       setAppState('ready');
     }
   }
@@ -92,20 +149,62 @@ export default function HomePage() {
     setAppState('ready');
   }
 
+  function toggleLang() {
+    const next: Lang = lang === 'en' ? 'es' : 'en';
+    setLang(next);
+    localStorage.setItem('smokeys_lang', next);
+  }
+
+  // ── Language Toggle Button (shared across states) ──
+  const langToggleBtn = (
+    <button onClick={toggleLang} style={styles.langToggle}>
+      {t(lang, 'langToggle')}
+    </button>
+  );
+
+  // ── Needs Permission State (Mobile) ──
+  if (appState === 'needs_permission') {
+    return (
+      <div style={styles.container}>
+        <div style={styles.card} className="animate-fadeIn">
+          {langToggleBtn}
+          <div style={styles.logoSection}>
+            <span style={styles.catEmoji}>🐈‍⬛</span>
+            <h1 style={styles.title}>{t(lang, 'appTitle')}</h1>
+            <p style={styles.subtitle}>{t(lang, 'staffClock')}</p>
+          </div>
+          <div style={styles.permSection}>
+            <div style={styles.permIcon}>📍</div>
+            <p style={styles.permTitle}>{t(lang, 'permTitle')}</p>
+            <p style={styles.permMessage}>{t(lang, 'permMessage')}</p>
+            <button
+              onClick={requestLocation}
+              className="btn-primary"
+              style={styles.permButton}
+            >
+              {t(lang, 'permButton')}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Loading State ──
   if (appState === 'loading') {
     return (
       <div style={styles.container}>
         <div style={styles.card} className="animate-fadeIn">
+          {langToggleBtn}
           <div style={styles.logoSection}>
             <span style={styles.catEmoji}>🐈‍⬛</span>
-            <h1 style={styles.title}>SMOKEY&apos;S</h1>
-            <p style={styles.subtitle}>Staff Clock</p>
+            <h1 style={styles.title}>{t(lang, 'appTitle')}</h1>
+            <p style={styles.subtitle}>{t(lang, 'staffClock')}</p>
           </div>
           <div style={styles.loadingSection}>
             <div style={styles.spinner} className="animate-pulse-slow" />
-            <p style={styles.loadingText}>Verifying your location...</p>
-            <p style={styles.loadingHint}>Please allow location access when prompted</p>
+            <p style={styles.loadingText}>{t(lang, 'loadingTitle')}</p>
+            <p style={styles.loadingHint}>{t(lang, 'loadingHint')}</p>
           </div>
         </div>
       </div>
@@ -117,17 +216,18 @@ export default function HomePage() {
     return (
       <div style={styles.container}>
         <div style={styles.card} className="animate-fadeIn">
+          {langToggleBtn}
           <div style={styles.logoSection}>
             <span style={styles.catEmoji}>🐈‍⬛</span>
-            <h1 style={styles.title}>SMOKEY&apos;S</h1>
-            <p style={styles.subtitle}>Staff Clock</p>
+            <h1 style={styles.title}>{t(lang, 'appTitle')}</h1>
+            <p style={styles.subtitle}>{t(lang, 'staffClock')}</p>
           </div>
           <div style={styles.errorSection}>
             <div style={styles.errorIcon}>📍</div>
-            <p style={styles.errorTitle}>Location Required</p>
+            <p style={styles.errorTitle}>{t(lang, 'locErrorTitle')}</p>
             <p style={styles.errorMessage}>{geoError}</p>
             <button onClick={requestLocation} className="btn-primary" style={{ marginTop: 16 }}>
-              Try Again
+              {t(lang, 'tryAgain')}
             </button>
           </div>
         </div>
@@ -140,23 +240,36 @@ export default function HomePage() {
     return (
       <div style={styles.container}>
         <div style={styles.card} className="animate-slideUp">
+          {langToggleBtn}
           <div style={styles.logoSection}>
             <span style={styles.catEmoji}>🐈‍⬛</span>
-            <h1 style={styles.title}>SMOKEY&apos;S</h1>
+            <h1 style={styles.title}>{t(lang, 'appTitle')}</h1>
           </div>
           <div style={styles.successSection}>
             <div style={styles.successIcon}>
               {result.action === 'check_in' ? '✅' : '👋'}
             </div>
             <p style={styles.successMessage}>{result.message}</p>
+
+            {result.check_in_time && (
+              <p style={styles.timeStamp}>
+                🕐 {formatTimeMedellin(result.check_in_time, lang)}
+              </p>
+            )}
+            {result.check_out_time && (
+              <p style={styles.timeStamp}>
+                🕐 {formatTimeMedellin(result.check_out_time, lang)}
+              </p>
+            )}
+
             <p style={styles.catQuote}>
               {result.action === 'check_in'
-                ? '"Clock in. Stay sharp."'
-                : '"Good hustle. See you tomorrow."'}
+                ? t(lang, 'checkInQuote')
+                : t(lang, 'checkOutQuote')}
             </p>
             {result.total_hours !== undefined && (
               <div style={styles.hoursCard}>
-                <span style={styles.hoursLabel}>Total Hours</span>
+                <span style={styles.hoursLabel}>{t(lang, 'totalHours')}</span>
                 <span style={styles.hoursValue}>
                   {Math.floor(result.total_hours)}h {Math.round((result.total_hours - Math.floor(result.total_hours)) * 60)}m
                 </span>
@@ -164,7 +277,7 @@ export default function HomePage() {
             )}
           </div>
           <button onClick={handleReset} className="btn-secondary" style={{ marginTop: 24 }}>
-            Done
+            {t(lang, 'done')}
           </button>
         </div>
       </div>
@@ -175,24 +288,30 @@ export default function HomePage() {
   return (
     <div style={styles.container}>
       <div style={styles.card} className="animate-fadeIn">
+        {langToggleBtn}
         <div style={styles.logoSection}>
           <span style={styles.catEmoji}>🐈‍⬛</span>
-          <h1 style={styles.title}>SMOKEY&apos;S</h1>
-          <p style={styles.subtitle}>Staff Clock</p>
+          <h1 style={styles.title}>{t(lang, 'appTitle')}</h1>
+          <p style={styles.subtitle}>{t(lang, 'staffClock')}</p>
         </div>
 
         <div style={styles.locationBadge}>
           <span style={styles.locationDot} />
-          Location verified
+          {t(lang, 'locVerified')}
+          {distanceKm !== null && (
+            <span style={{ marginLeft: 4, opacity: 0.7 }}>
+              ({formatDistance(distanceKm, lang)} {t(lang, 'away')})
+            </span>
+          )}
         </div>
 
         <div style={styles.formSection}>
           <div style={styles.inputGroup}>
-            <label style={styles.label}>Staff ID</label>
+            <label style={styles.label}>{t(lang, 'staffId')}</label>
             <input
               type="text"
               className="input-field"
-              placeholder="e.g. SMK001"
+              placeholder={t(lang, 'staffIdPlaceholder')}
               value={staffCode}
               onChange={(e) => setStaffCode(e.target.value.toUpperCase())}
               autoCapitalize="characters"
@@ -202,11 +321,11 @@ export default function HomePage() {
           </div>
 
           <div style={styles.inputGroup}>
-            <label style={styles.label}>PIN</label>
+            <label style={styles.label}>{t(lang, 'pin')}</label>
             <input
               type="password"
               className="input-field"
-              placeholder="Enter your PIN"
+              placeholder={t(lang, 'pinPlaceholder')}
               value={pin}
               onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
               inputMode="numeric"
@@ -229,7 +348,7 @@ export default function HomePage() {
               disabled={appState === 'submitting'}
               style={{ flex: 1 }}
             >
-              {appState === 'submitting' ? '...' : '✦ CHECK IN'}
+              {appState === 'submitting' ? '...' : t(lang, 'checkIn')}
             </button>
             <button
               onClick={() => handleClock('check_out')}
@@ -237,13 +356,13 @@ export default function HomePage() {
               disabled={appState === 'submitting'}
               style={{ flex: 1 }}
             >
-              {appState === 'submitting' ? '...' : 'CHECK OUT ✦'}
+              {appState === 'submitting' ? '...' : t(lang, 'checkOut')}
             </button>
           </div>
         </div>
 
         <a href="/admin" style={styles.adminLink}>
-          Admin Dashboard →
+          {t(lang, 'adminDashboard')}
         </a>
       </div>
     </div>
@@ -267,6 +386,21 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '40px 28px',
     border: '1px solid #2a2a2a',
     boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+    position: 'relative' as const,
+  },
+  langToggle: {
+    position: 'absolute' as const,
+    top: '16px',
+    right: '16px',
+    background: 'rgba(255,255,255,0.08)',
+    border: '1px solid rgba(255,255,255,0.12)',
+    borderRadius: '20px',
+    padding: '6px 14px',
+    color: '#ccc',
+    fontSize: '13px',
+    cursor: 'pointer',
+    fontWeight: 500,
+    transition: 'background 0.2s',
   },
   logoSection: {
     textAlign: 'center' as const,
@@ -291,6 +425,33 @@ const styles: Record<string, React.CSSProperties> = {
     textTransform: 'uppercase' as const,
     marginTop: '4px',
   },
+  // Permission screen
+  permSection: {
+    textAlign: 'center' as const,
+    padding: '20px 0',
+  },
+  permIcon: {
+    fontSize: '56px',
+    marginBottom: '16px',
+  },
+  permTitle: {
+    fontSize: '20px',
+    fontWeight: 700,
+    color: '#f0b427',
+    margin: '0 0 12px',
+  },
+  permMessage: {
+    color: '#999',
+    fontSize: '15px',
+    margin: '0 0 24px',
+    lineHeight: 1.6,
+  },
+  permButton: {
+    fontSize: '16px',
+    padding: '16px 32px',
+    width: '100%',
+  },
+  // Location badge
   locationBadge: {
     display: 'flex',
     alignItems: 'center',
@@ -409,6 +570,11 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#fff',
     margin: '0 0 12px',
     lineHeight: 1.4,
+  },
+  timeStamp: {
+    fontSize: '14px',
+    color: '#aaa',
+    margin: '0 0 8px',
   },
   catQuote: {
     fontSize: '15px',

@@ -32,7 +32,7 @@ interface TimeLog {
     staff?: Staff;
 }
 
-type Tab = 'staff' | 'logs' | 'reports';
+type Tab = 'staff' | 'logs' | 'reports' | 'qrcode' | 'settings';
 
 export default function AdminDashboard() {
     const router = useRouter();
@@ -227,7 +227,7 @@ export default function AdminDashboard() {
 
             {/* Tabs */}
             <nav style={styles.tabs}>
-                {(['staff', 'logs', 'reports'] as Tab[]).map(tab => (
+                {(['staff', 'logs', 'reports', 'qrcode', 'settings'] as Tab[]).map(tab => (
                     <button
                         key={tab}
                         onClick={() => setActiveTab(tab)}
@@ -236,7 +236,7 @@ export default function AdminDashboard() {
                             ...(activeTab === tab ? styles.tabActive : {}),
                         }}
                     >
-                        {tab === 'staff' ? '👥 Staff' : tab === 'logs' ? '📋 Time Logs' : '📊 Reports'}
+                        {tab === 'staff' ? '👥 Staff' : tab === 'logs' ? '📋 Time Logs' : tab === 'reports' ? '📊 Reports' : tab === 'qrcode' ? '📱 QR Code' : '⚙️ Settings'}
                     </button>
                 ))}
             </nav>
@@ -482,7 +482,553 @@ export default function AdminDashboard() {
                         </div>
                     </div>
                 )}
+
+                {/* ── QR CODE TAB ── */}
+                {activeTab === 'qrcode' && (
+                    <QRCodePanel />
+                )}
+
+                {/* ── SETTINGS TAB ── */}
+                {activeTab === 'settings' && (
+                    <SettingsPanel />
+                )}
             </main>
+        </div>
+    );
+}
+
+function parseGoogleMapsUrl(url: string): { lat: number; lng: number } | null {
+    // Format: https://maps.google.com/?q=40.7128,-74.0060
+    // Format: https://www.google.com/maps/@40.7128,-74.0060,17z
+    // Format: https://www.google.com/maps/place/.../@40.7128,-74.0060,17z/...
+    // Format: https://goo.gl/maps/... (shortened — user should paste full URL)
+    // Format: 40.7128,-74.0060 (raw coordinates)
+    const trimmed = url.trim();
+
+    // Try raw coordinates: "lat,lng" or "lat, lng"
+    const rawMatch = trimmed.match(/^(-?\d+\.\d+),\s*(-?\d+\.\d+)$/);
+    if (rawMatch) {
+        return { lat: parseFloat(rawMatch[1]), lng: parseFloat(rawMatch[2]) };
+    }
+
+    // Try ?q=lat,lng or ?ll=lat,lng
+    const qMatch = trimmed.match(/[?&](?:q|ll|center)=(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (qMatch) {
+        return { lat: parseFloat(qMatch[1]), lng: parseFloat(qMatch[2]) };
+    }
+
+    // Try /@lat,lng pattern
+    const atMatch = trimmed.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (atMatch) {
+        return { lat: parseFloat(atMatch[1]), lng: parseFloat(atMatch[2]) };
+    }
+
+    // Try /place/lat,lng
+    const placeMatch = trimmed.match(/\/place\/(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (placeMatch) {
+        return { lat: parseFloat(placeMatch[1]), lng: parseFloat(placeMatch[2]) };
+    }
+
+    return null;
+}
+
+function SettingsPanel() {
+    const [mapsLink, setMapsLink] = useState('');
+    const [parsedCoords, setParsedCoords] = useState<{ lat: number; lng: number } | null>(null);
+    const [radiusMeters, setRadiusMeters] = useState(100);
+    const [currentSettings, setCurrentSettings] = useState<{ id: string; restaurant_lat: number | null; restaurant_lng: number | null; radius_meters: number } | null>(null);
+    const [saving, setSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+    const [parseError, setParseError] = useState('');
+    const [resolving, setResolving] = useState(false);
+
+    useEffect(() => {
+        loadSettings();
+    }, []);
+
+    async function loadSettings() {
+        const { data } = await supabase.from('settings').select('*').limit(1).single();
+        if (data) {
+            setCurrentSettings(data);
+            setRadiusMeters(data.radius_meters || 100);
+            if (data.restaurant_lat && data.restaurant_lng) {
+                setParsedCoords({ lat: data.restaurant_lat, lng: data.restaurant_lng });
+            }
+        }
+    }
+
+    async function handleParse() {
+        setParseError('');
+        setSaved(false);
+        // Fallback: read from DOM if React state is empty (handles paste / autofill)
+        let urlValue = mapsLink;
+        if (!urlValue) {
+            const inputEl = document.querySelector<HTMLInputElement>('input[placeholder="Paste Google Maps link or lat,lng"]');
+            if (inputEl?.value) {
+                urlValue = inputEl.value;
+                setMapsLink(urlValue);
+            }
+        }
+
+        // If it's a shortened Google Maps URL, resolve it first
+        if (urlValue.includes('maps.app.goo.gl') || urlValue.includes('goo.gl/maps')) {
+            setResolving(true);
+            try {
+                const res = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/resolve-maps-url`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: urlValue }),
+                });
+                const data = await res.json();
+                if (data.resolvedUrl) {
+                    urlValue = data.resolvedUrl;
+                    setMapsLink(urlValue);
+                } else {
+                    setParseError('Could not resolve shortened URL. Try pasting the full Google Maps URL instead.');
+                    setResolving(false);
+                    return;
+                }
+            } catch {
+                setParseError('Network error resolving shortened URL. Try pasting the full Google Maps URL instead.');
+                setResolving(false);
+                return;
+            }
+            setResolving(false);
+        }
+
+        const coords = parseGoogleMapsUrl(urlValue);
+        if (coords) {
+            if (coords.lat < -90 || coords.lat > 90 || coords.lng < -180 || coords.lng > 180) {
+                setParseError('Coordinates out of valid range.');
+                setParsedCoords(null);
+                return;
+            }
+            setParsedCoords(coords);
+        } else {
+            setParseError('Could not extract coordinates. Try pasting the full Google Maps URL or enter raw coordinates like "40.7128,-74.0060".');
+            setParsedCoords(null);
+        }
+    }
+
+    async function handleSave() {
+        if (!parsedCoords) return;
+        setSaving(true);
+        setSaved(false);
+        setParseError('');
+
+        const updateData = {
+            restaurant_lat: parsedCoords.lat,
+            restaurant_lng: parsedCoords.lng,
+            radius_meters: radiusMeters,
+        };
+
+        let error;
+        if (currentSettings) {
+            const result = await supabase.from('settings').update(updateData).eq('id', currentSettings.id);
+            error = result.error;
+        } else {
+            const result = await supabase.from('settings').insert(updateData);
+            error = result.error;
+        }
+
+        if (error) {
+            console.error('Save error:', error);
+            setParseError(`Save failed: ${error.message}`);
+            setSaving(false);
+            return;
+        }
+
+        // Refresh settings from DB — keep parsedCoords as the source of truth
+        const { data } = await supabase.from('settings').select('*').limit(1).single();
+        if (data) {
+            setCurrentSettings(data);
+            setRadiusMeters(data.radius_meters || 100);
+        }
+
+        setSaving(false);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 3000);
+    }
+
+    const mapPreviewUrl = parsedCoords
+        ? `https://maps.googleapis.com/maps/api/staticmap?center=${parsedCoords.lat},${parsedCoords.lng}&zoom=16&size=400x250&markers=color:red%7C${parsedCoords.lat},${parsedCoords.lng}&key=&style=feature:all|element:geometry|color:0x242f3e`
+        : null;
+
+    return (
+        <div className="animate-fadeIn">
+            <h2 style={styles.sectionTitle}>Restaurant Settings</h2>
+            <p style={{ color: '#999', fontSize: 14, marginTop: 8, marginBottom: 24 }}>
+                Set your restaurant&apos;s location so the app can verify staff are on-site when clocking in.
+            </p>
+
+            <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' as const, alignItems: 'flex-start' }}>
+                {/* Left: Input */}
+                <div style={{ flex: '1 1 340px' }}>
+                    <div className="card" style={{ padding: 24 }}>
+                        <h3 style={{ fontSize: 14, fontWeight: 700, color: '#f0b427', margin: '0 0 16px' }}>
+                            📍 Set Location
+                        </h3>
+
+                        <label style={{
+                            fontSize: 12, fontWeight: 600, color: '#999',
+                            textTransform: 'uppercase' as const, letterSpacing: '0.5px',
+                            display: 'block', marginBottom: 6,
+                        }}>Google Maps Link or Coordinates</label>
+                        <input
+                            className="input-field"
+                            value={mapsLink}
+                            onChange={e => { setMapsLink(e.target.value); setParseError(''); setSaved(false); }}
+                            placeholder="Paste Google Maps link or lat,lng"
+                        />
+                        <p style={{ fontSize: 11, color: '#666', marginTop: 6, lineHeight: 1.5 }}>
+                            Open Google Maps → find your restaurant → tap &quot;Share&quot; → copy the link and paste it here.
+                            Or just type the coordinates like <span style={{ color: '#f0b427' }}>40.7128,-74.0060</span>
+                        </p>
+
+                        <button onClick={handleParse} className="btn-primary" style={{ marginTop: 12, marginBottom: 0 }} disabled={resolving}>
+                            {resolving ? '⏳ Resolving link…' : '🔍 Extract Coordinates'}
+                        </button>
+
+                        {parseError && (
+                            <p style={{ color: '#ff6b6b', fontSize: 13, marginTop: 10 }}>{parseError}</p>
+                        )}
+                    </div>
+
+                    {/* Parsed result */}
+                    {parsedCoords && (
+                        <div className="card" style={{ padding: 24, marginTop: 16 }}>
+                            <h3 style={{ fontSize: 14, fontWeight: 700, color: '#f0b427', margin: '0 0 16px' }}>
+                                ✅ Coordinates Found
+                            </h3>
+                            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+                                <div style={{ flex: 1 }}>
+                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Latitude</label>
+                                    <div style={{
+                                        background: '#1a1a1a', border: '1px solid #333', borderRadius: 8,
+                                        padding: '10px 12px', color: '#4ecdc4', fontFamily: 'monospace', fontSize: 14,
+                                    }}>
+                                        {parsedCoords.lat.toFixed(6)}
+                                    </div>
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Longitude</label>
+                                    <div style={{
+                                        background: '#1a1a1a', border: '1px solid #333', borderRadius: 8,
+                                        padding: '10px 12px', color: '#4ecdc4', fontFamily: 'monospace', fontSize: 14,
+                                    }}>
+                                        {parsedCoords.lng.toFixed(6)}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <label style={{
+                                fontSize: 12, fontWeight: 600, color: '#999',
+                                textTransform: 'uppercase' as const, letterSpacing: '0.5px',
+                                display: 'block', marginBottom: 6,
+                            }}>Check-in Radius</label>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                <input
+                                    type="range"
+                                    min={25}
+                                    max={5000}
+                                    step={25}
+                                    value={radiusMeters}
+                                    onChange={e => setRadiusMeters(Number(e.target.value))}
+                                    style={{ flex: 1, accentColor: '#f0b427' }}
+                                />
+                                <span style={{ color: '#f0b427', fontWeight: 700, fontSize: 16, minWidth: 60, textAlign: 'right' as const }}>
+                                    {radiusMeters >= 1000 ? `${(radiusMeters / 1000).toFixed(1)}km` : `${radiusMeters}m`}
+                                </span>
+                            </div>
+                            <p style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
+                                Staff must be within this distance from the restaurant to clock in.
+                                100m is recommended for most locations. Slide right for up to 5km.
+                            </p>
+
+                            <button
+                                onClick={handleSave}
+                                className="btn-primary"
+                                disabled={saving}
+                                style={{ marginTop: 16 }}
+                            >
+                                {saving ? 'Saving...' : saved ? '✅ Saved!' : '💾 Save Location'}
+                            </button>
+
+                            {saved && (
+                                <p style={{ color: '#4ecdc4', fontSize: 13, marginTop: 8, textAlign: 'center' as const }}>
+                                    Restaurant location updated successfully! Staff GPS checks will use this location.
+                                </p>
+                            )}
+                        </div>
+                    )}
+                </div>
+
+                {/* Right: Map Preview / Current Settings */}
+                <div style={{ flex: '1 1 340px' }}>
+                    {/* Current settings card */}
+                    <div className="card" style={{ padding: 24 }}>
+                        <h3 style={{ fontSize: 14, fontWeight: 700, color: '#f0b427', margin: '0 0 12px' }}>
+                            📍 Current Location
+                        </h3>
+                        {currentSettings?.restaurant_lat && currentSettings?.restaurant_lng ? (
+                            <>
+                                <div style={{ display: 'flex', gap: 16, marginBottom: 12 }}>
+                                    <div>
+                                        <span style={{ fontSize: 11, color: '#666' }}>Lat: </span>
+                                        <span style={{ color: '#4ecdc4', fontFamily: 'monospace' }}>
+                                            {currentSettings.restaurant_lat.toFixed(6)}
+                                        </span>
+                                    </div>
+                                    <div>
+                                        <span style={{ fontSize: 11, color: '#666' }}>Lng: </span>
+                                        <span style={{ color: '#4ecdc4', fontFamily: 'monospace' }}>
+                                            {currentSettings.restaurant_lng.toFixed(6)}
+                                        </span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <span style={{ fontSize: 11, color: '#666' }}>Radius: </span>
+                                    <span style={{ color: '#f0b427', fontWeight: 700 }}>
+                                        {currentSettings.radius_meters >= 1000 ? `${(currentSettings.radius_meters / 1000).toFixed(1)}km` : `${currentSettings.radius_meters}m`}
+                                    </span>
+                                </div>
+                                <a
+                                    href={`https://www.google.com/maps/@${currentSettings.restaurant_lat},${currentSettings.restaurant_lng},17z`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{
+                                        display: 'inline-block', marginTop: 12,
+                                        color: '#f0b427', fontSize: 13, textDecoration: 'underline',
+                                    }}
+                                >
+                                    View on Google Maps ↗
+                                </a>
+                                {mapPreviewUrl && (
+                                    <div style={{
+                                        marginTop: 16, borderRadius: 12, overflow: 'hidden',
+                                        border: '1px solid #333', background: '#1a1a1a',
+                                        padding: 12, textAlign: 'center' as const,
+                                    }}>
+                                        <div style={{
+                                            width: '100%', height: 200, borderRadius: 8,
+                                            background: '#222', display: 'flex',
+                                            alignItems: 'center', justifyContent: 'center',
+                                            flexDirection: 'column' as const, gap: 8,
+                                        }}>
+                                            <span style={{ fontSize: 40 }}>📍</span>
+                                            <span style={{ color: '#4ecdc4', fontFamily: 'monospace', fontSize: 13 }}>
+                                                {parsedCoords?.lat.toFixed(4)}, {parsedCoords?.lng.toFixed(4)}
+                                            </span>
+                                            <span style={{ color: '#666', fontSize: 11 }}>
+                                                Radius: {radiusMeters}m
+                                            </span>
+                                        </div>
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <div style={{
+                                background: '#1a1a1a', border: '2px dashed #333',
+                                borderRadius: 12, padding: '40px 20px',
+                                textAlign: 'center' as const,
+                            }}>
+                                <span style={{ fontSize: 40 }}>🏪</span>
+                                <p style={{ color: '#666', fontSize: 13, marginTop: 12 }}>
+                                    No location set yet. Paste a Google Maps link to set your restaurant&apos;s location.
+                                </p>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* How it works */}
+                    <div className="card" style={{ padding: 24, marginTop: 16 }}>
+                        <h3 style={{ fontSize: 14, fontWeight: 700, color: '#f0b427', margin: '0 0 12px' }}>
+                            💡 How It Works
+                        </h3>
+                        <ol style={{ color: '#999', fontSize: 13, lineHeight: 2, margin: 0, paddingLeft: 20 }}>
+                            <li>Open <strong style={{ color: '#ccc' }}>Google Maps</strong> on your phone</li>
+                            <li>Search for or navigate to your restaurant</li>
+                            <li>Tap <strong style={{ color: '#ccc' }}>Share</strong> → <strong style={{ color: '#ccc' }}>Copy Link</strong></li>
+                            <li>Paste the link above and click <strong style={{ color: '#ccc' }}>Extract Coordinates</strong></li>
+                            <li>Adjust the check-in radius and <strong style={{ color: '#ccc' }}>Save</strong></li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function QRCodePanel() {
+    const [qrUrl, setQrUrl] = useState('');
+    const [customUrl, setCustomUrl] = useState('');
+    const [generated, setGenerated] = useState(false);
+
+    useEffect(() => {
+        // Default to current origin
+        if (typeof window !== 'undefined') {
+            setCustomUrl(window.location.origin);
+        }
+    }, []);
+
+    async function generateQR() {
+        const url = customUrl.trim() || window.location.origin;
+        try {
+            const QRCode = (await import('qrcode')).default;
+            const dataUrl = await QRCode.toDataURL(url, {
+                width: 400,
+                margin: 2,
+                color: {
+                    dark: '#111111',
+                    light: '#ffffff',
+                },
+                errorCorrectionLevel: 'H',
+            });
+            setQrUrl(dataUrl);
+            setGenerated(true);
+        } catch (err) {
+            console.error('QR generation failed:', err);
+        }
+    }
+
+    function downloadQR() {
+        if (!qrUrl) return;
+        const a = document.createElement('a');
+        a.href = qrUrl;
+        a.download = 'smokeys-staff-clock-qr.png';
+        a.click();
+    }
+
+    function printQR() {
+        if (!qrUrl) return;
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) return;
+        printWindow.document.write(`
+            <html>
+                <head><title>Smokey's QR Code</title></head>
+                <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:Inter,sans-serif;background:#fff;">
+                    <h1 style="font-size:32px;letter-spacing:4px;color:#111;">SMOKEY'S</h1>
+                    <p style="font-size:16px;color:#666;margin-bottom:24px;">Scan to Clock In / Out</p>
+                    <img src="${qrUrl}" style="width:300px;height:300px;" />
+                    <p style="font-size:12px;color:#999;margin-top:16px;">${customUrl || window.location.origin}</p>
+                </body>
+            </html>
+        `);
+        printWindow.document.close();
+        printWindow.onload = () => {
+            printWindow.print();
+        };
+    }
+
+    return (
+        <div className="animate-fadeIn">
+            <h2 style={styles.sectionTitle}>QR Code Generator</h2>
+            <p style={{ color: '#999', fontSize: 14, marginTop: 8, marginBottom: 24 }}>
+                Generate a QR code to print and place at the restaurant entrance or kitchen.
+                Staff scan this code with their phone to open the clock-in page.
+            </p>
+
+            <div style={{
+                display: 'flex',
+                gap: '32px',
+                flexWrap: 'wrap' as const,
+                alignItems: 'flex-start',
+            }}>
+                {/* Left: Settings */}
+                <div style={{ flex: '1 1 300px' }}>
+                    <div className="card" style={{ padding: 24 }}>
+                        <div style={{ marginBottom: 16 }}>
+                            <label style={{
+                                fontSize: 12, fontWeight: 600, color: '#999',
+                                textTransform: 'uppercase' as const, letterSpacing: '0.5px',
+                                display: 'block', marginBottom: 6,
+                            }}>App URL</label>
+                            <input
+                                className="input-field"
+                                value={customUrl}
+                                onChange={e => setCustomUrl(e.target.value)}
+                                placeholder="https://your-deployed-url.com"
+                            />
+                            <p style={{ fontSize: 12, color: '#666', marginTop: 6 }}>
+                                This is the URL staff will be directed to when they scan the QR code.
+                                Use your deployed URL (e.g. Vercel) for production.
+                            </p>
+                        </div>
+
+                        <button onClick={generateQR} className="btn-primary" style={{ marginBottom: 12 }}>
+                            {generated ? '🔄 Regenerate QR Code' : '📱 Generate QR Code'}
+                        </button>
+
+                        {generated && (
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <button onClick={downloadQR} className="btn-secondary" style={{ flex: 1, padding: '10px 12px', fontSize: 13 }}>
+                                    📥 Download PNG
+                                </button>
+                                <button onClick={printQR} className="btn-secondary" style={{ flex: 1, padding: '10px 12px', fontSize: 13 }}>
+                                    🖨️ Print
+                                </button>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Placement Tips */}
+                    <div className="card" style={{ padding: 24, marginTop: 16 }}>
+                        <h3 style={{ fontSize: 14, fontWeight: 700, color: '#f0b427', margin: '0 0 12px' }}>
+                            📍 Placement Tips
+                        </h3>
+                        <ul style={{ color: '#999', fontSize: 13, lineHeight: 1.8, margin: 0, paddingLeft: 20 }}>
+                            <li>Print on a sturdy card or laminate it</li>
+                            <li>Place at the entrance and inside the kitchen</li>
+                            <li>Make sure it&apos;s at eye level and well-lit</li>
+                            <li>Staff need WiFi or data to connect after scanning</li>
+                            <li>The QR code only opens the login page — GPS + PIN are still required</li>
+                        </ul>
+                    </div>
+                </div>
+
+                {/* Right: Preview */}
+                <div style={{ flex: '1 1 300px', display: 'flex', justifyContent: 'center' }}>
+                    {generated && qrUrl ? (
+                        <div style={{
+                            background: '#fff',
+                            borderRadius: 20,
+                            padding: '40px 32px',
+                            textAlign: 'center' as const,
+                            maxWidth: 380,
+                            width: '100%',
+                            boxShadow: '0 8px 40px rgba(0,0,0,0.3)',
+                        }}>
+                            <h2 style={{ fontSize: 24, fontWeight: 900, color: '#111', letterSpacing: 4, margin: '0 0 4px' }}>
+                                SMOKEY&apos;S
+                            </h2>
+                            <p style={{ fontSize: 13, color: '#666', margin: '0 0 20px' }}>Scan to Clock In / Out</p>
+                            <img
+                                src={qrUrl}
+                                alt="Staff Clock QR Code"
+                                style={{ width: '100%', maxWidth: 280, height: 'auto', borderRadius: 8 }}
+                            />
+                            <p style={{ fontSize: 11, color: '#999', marginTop: 16, wordBreak: 'break-all' as const }}>
+                                {customUrl || window.location.origin}
+                            </p>
+                        </div>
+                    ) : (
+                        <div style={{
+                            background: '#1a1a1a',
+                            border: '2px dashed #333',
+                            borderRadius: 20,
+                            padding: '60px 32px',
+                            textAlign: 'center' as const,
+                            maxWidth: 380,
+                            width: '100%',
+                        }}>
+                            <span style={{ fontSize: 48 }}>📱</span>
+                            <p style={{ color: '#666', fontSize: 14, marginTop: 16 }}>
+                                Click &quot;Generate QR Code&quot; to create a scannable code for your staff.
+                            </p>
+                        </div>
+                    )}
+                </div>
+            </div>
         </div>
     );
 }
