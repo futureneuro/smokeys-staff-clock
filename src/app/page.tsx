@@ -190,6 +190,10 @@ export default function HomePage() {
 
   // ── Location Error State ──
   if (appState === 'location_error') {
+    const isDenied = geoError.toLowerCase().includes('denied');
+    const isIOS = typeof navigator !== 'undefined' &&
+      /iPad|iPhone|iPod/.test(navigator.userAgent);
+
     return (
       <div style={styles.container}>
         <div style={styles.card} className="animate-fadeIn">
@@ -200,9 +204,26 @@ export default function HomePage() {
             <p style={styles.subtitle}>{t(lang, 'staffClock')}</p>
           </div>
           <div style={styles.errorSection}>
-            <div style={styles.errorIcon}>📍</div>
-            <p style={styles.errorTitle}>{t(lang, 'locErrorTitle')}</p>
-            <p style={styles.errorMessage}>{geoError}</p>
+            <div style={styles.errorIcon}>{isDenied ? '🔒' : '📍'}</div>
+            <p style={styles.errorTitle}>
+              {isDenied ? t(lang, 'locDeniedTitle') : t(lang, 'locErrorTitle')}
+            </p>
+            <p style={styles.errorMessage}>
+              {isDenied ? t(lang, 'locDeniedMsg') : geoError}
+            </p>
+
+            {isDenied && (
+              <div style={styles.helpBox}>
+                <p style={styles.helpTitle}>
+                  {isIOS ? t(lang, 'iosHelpTitle') : t(lang, 'iosHelpTitle')}
+                </p>
+                <p style={styles.helpStep}>{t(lang, 'iosStep1')}</p>
+                <p style={styles.helpStep}>{t(lang, 'iosStep2')}</p>
+                <p style={styles.helpStep}>{t(lang, 'iosStep3')}</p>
+                <p style={styles.helpStep}>{t(lang, 'iosStep4')}</p>
+              </div>
+            )}
+
             <button onClick={requestLocation} className="btn-primary" style={{ marginTop: 16 }}>
               {t(lang, 'tryAgain')}
             </button>
@@ -531,6 +552,26 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#999',
     fontSize: '14px',
     margin: 0,
+    lineHeight: 1.5,
+  },
+  helpBox: {
+    marginTop: '16px',
+    padding: '16px',
+    background: 'rgba(240, 180, 39, 0.08)',
+    border: '1px solid rgba(240, 180, 39, 0.2)',
+    borderRadius: '12px',
+    textAlign: 'left' as const,
+  },
+  helpTitle: {
+    fontSize: '14px',
+    fontWeight: 700,
+    color: '#f0b427',
+    margin: '0 0 10px',
+  },
+  helpStep: {
+    fontSize: '13px',
+    color: '#ccc',
+    margin: '0 0 6px',
     lineHeight: 1.5,
   },
   successSection: {

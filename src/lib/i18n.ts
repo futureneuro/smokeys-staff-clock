@@ -18,6 +18,13 @@ const translations: Record<Lang, Record<string, string>> = {
 
         // Location error
         locErrorTitle: 'Location Required',
+        locDeniedTitle: 'Location Access Denied',
+        locDeniedMsg: 'Your browser has blocked location access for this site.',
+        iosHelpTitle: 'How to fix on iPhone:',
+        iosStep1: '1. Open Settings → Safari',
+        iosStep2: '2. Scroll down → tap "Clear History and Website Data"',
+        iosStep3: '3. Or: Settings → Safari → Advanced → Website Data → search this site → Delete',
+        iosStep4: '4. Come back here and tap the button below',
         tryAgain: 'TRY AGAIN',
 
         // Distance error (templates use {dist} and {radius})
@@ -63,6 +70,13 @@ const translations: Record<Lang, Record<string, string>> = {
 
         // Location error
         locErrorTitle: 'Ubicación Requerida',
+        locDeniedTitle: 'Acceso a Ubicación Denegado',
+        locDeniedMsg: 'Tu navegador ha bloqueado el acceso a la ubicación para este sitio.',
+        iosHelpTitle: 'Cómo arreglarlo en iPhone:',
+        iosStep1: '1. Abre Ajustes → Safari',
+        iosStep2: '2. Baja → toca "Borrar historial y datos de sitios web"',
+        iosStep3: '3. O: Ajustes → Safari → Avanzado → Datos de sitios web → busca este sitio → Eliminar',
+        iosStep4: '4. Regresa aquí y toca el botón de abajo',
         tryAgain: 'INTENTAR DE NUEVO',
 
         // Distance error
