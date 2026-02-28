@@ -1181,7 +1181,7 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                 {[
                     { key: 'library' as const, icon: '📋', label: `Library (${templates.length})` },
                     { key: 'calendar' as const, icon: '📆', label: 'Calendar' },
-                    { key: 'assignments' as const, icon: '✅', label: `Assignments (${tasks.length})` },
+                    { key: 'assignments' as const, icon: '✅', label: `Assignments (${tasks.filter(t => t.status !== 'Completed').length})` },
                 ].map(tab => (
                     <button
                         key={tab.key}
@@ -1556,7 +1556,217 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                 </div>
 
                 {/* ═══ RIGHT: Active Assignments ═══ */}
-                <div className="tasks-assignments-panel" style={{ display: activePanel === 'assignments' ? 'block' : undefined }}>
+                {/* ═══ RIGHT: Active Assignments (flat list for Library tab) ═══ */}
+                {activePanel === 'library' && (
+                    <div className="tasks-assignments-panel">
+                        <div className="card" style={{ padding: 20 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                                <h3 style={{ fontSize: 16, fontWeight: 700, color: '#fff', margin: 0 }}>✅ Active Assignments</h3>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    <div style={{ display: 'flex', background: '#111', borderRadius: 8, overflow: 'hidden', border: '1px solid #333' }}>
+                                        <button onClick={() => setAssignmentDateFilter('today')} style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: assignmentDateFilter === 'today' ? '#f0b427' : 'transparent', color: assignmentDateFilter === 'today' ? '#000' : '#999', transition: 'all 0.2s' }}>📅 Today</button>
+                                        <button onClick={() => setAssignmentDateFilter('all')} style={{ padding: '6px 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: assignmentDateFilter === 'all' ? '#f0b427' : 'transparent', color: assignmentDateFilter === 'all' ? '#000' : '#999', transition: 'all 0.2s' }}>📋 All</button>
+                                    </div>
+                                    <select className="input-field" value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{ width: 'auto', minWidth: 100, padding: '6px 10px', fontSize: 12 }}>
+                                        <option value="all">All Status</option>
+                                        {statuses.map(s => (
+                                            <option key={s.id} value={s.label}>{s.label}</option>
+                                        ))}
+                                    </select>
+                                    <select className="input-field" value={filterStaff} onChange={e => setFilterStaff(e.target.value)} style={{ width: 'auto', minWidth: 100, padding: '6px 10px', fontSize: 12 }}>
+                                        <option value="">All Staff</option>
+                                        {staffList.filter(s => s.active).map(s => (
+                                            <option key={s.id} value={s.id}>{s.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+
+                            {(() => {
+                                // Filter tasks by date
+                                const filtered = assignmentDateFilter === 'today'
+                                    ? tasks.filter(t => t.due_date === today)
+                                    : tasks;
+
+                                if (loadingTasks) return <p style={{ color: '#666', textAlign: 'center', padding: 20 }}>Loading...</p>;
+                                if (filtered.length === 0) return (
+                                    <div style={{ textAlign: 'center', padding: '40px 10px', color: '#666' }}>
+                                        <p style={{ fontSize: 36, marginBottom: 8 }}>📌</p>
+                                        <p style={{ fontSize: 14, fontWeight: 500 }}>{assignmentDateFilter === 'today' ? 'No tasks due today' : 'No assignments yet'}</p>
+                                        {assignmentDateFilter === 'today' && <button onClick={() => setAssignmentDateFilter('all')} style={{ marginTop: 8, background: 'none', border: '1px solid #333', borderRadius: 8, color: '#f0b427', padding: '6px 16px', fontSize: 12, cursor: 'pointer' }}>View All Tasks</button>}
+                                    </div>
+                                );
+
+                                // Group tasks: recurring groups + standalone
+                                const groups: { groupId: string | null; legacyKey?: string; tasks: Task[]; isRecurring: boolean }[] = [];
+                                const groupedById = new Set<string>();
+                                const legacyGroups = new Map<string, Task[]>();
+                                const processedTaskIds = new Set<string>();
+
+                                for (const task of filtered) {
+                                    if (task.recurrence_group_id && !groupedById.has(task.recurrence_group_id)) {
+                                        groupedById.add(task.recurrence_group_id);
+                                        const siblings = filtered.filter(t => t.recurrence_group_id === task.recurrence_group_id);
+                                        groups.push({ groupId: task.recurrence_group_id, tasks: siblings, isRecurring: true });
+                                        siblings.forEach(s => processedTaskIds.add(s.id));
+                                    }
+                                }
+
+                                for (const task of filtered) {
+                                    if (processedTaskIds.has(task.id)) continue;
+                                    if (task.recurrence_rule && !task.recurrence_group_id) {
+                                        const key = `${task.title}::${task.staff_id}::${task.recurrence_rule.frequency}`;
+                                        if (!legacyGroups.has(key)) legacyGroups.set(key, []);
+                                        legacyGroups.get(key)!.push(task);
+                                        processedTaskIds.add(task.id);
+                                    }
+                                }
+                                for (const [key, tasks] of legacyGroups) {
+                                    if (tasks.length > 1) {
+                                        groups.push({ groupId: null, legacyKey: key, tasks, isRecurring: true });
+                                    } else {
+                                        groups.push({ groupId: null, tasks, isRecurring: false });
+                                    }
+                                }
+
+                                for (const task of filtered) {
+                                    if (!processedTaskIds.has(task.id)) {
+                                        groups.push({ groupId: null, tasks: [task], isRecurring: false });
+                                    }
+                                }
+
+                                return (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 600, overflowY: 'auto' }}>
+                                        {groups.map((group) => {
+                                            if (!group.isRecurring) {
+                                                const task = group.tasks[0];
+                                                const staffInfo = task.staff as unknown as Staff | undefined;
+                                                const isOverdue = task.due_date < today && task.status !== 'Completed';
+                                                return (
+                                                    <div key={task.id} style={{
+                                                        background: isOverdue ? 'rgba(239,68,68,0.05)' : '#111',
+                                                        border: `1px solid ${isOverdue ? 'rgba(239,68,68,0.3)' : '#222'}`,
+                                                        borderRadius: 10, padding: 14, cursor: 'pointer', transition: 'border-color 0.2s',
+                                                    }} onClick={() => openEditTask(task)} onMouseEnter={e => (e.currentTarget.style.borderColor = '#555')} onMouseLeave={e => (e.currentTarget.style.borderColor = isOverdue ? 'rgba(239,68,68,0.3)' : '#222')}>
+                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                                                            <div style={{ flex: 1 }}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                                                                    <button onClick={e => { e.stopPropagation(); toggleComplete(task); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, padding: 0, lineHeight: 1 }}>
+                                                                        {task.status === 'Completed' ? '✅' : '⬜'}
+                                                                    </button>
+                                                                    <strong style={{ color: task.status === 'Completed' ? '#666' : '#fff', fontSize: 14, textDecoration: task.status === 'Completed' ? 'line-through' : 'none' }}>
+                                                                        {task.title}
+                                                                    </strong>
+                                                                    {statusBadge(task.status)}
+                                                                    {priorityBadge(task.priority || 'medium')}
+                                                                </div>
+                                                                {task.description && <p style={{ color: '#888', fontSize: 12, margin: '2px 0 0 30px' }}>{task.description.length > 120 ? task.description.slice(0, 120) + '...' : task.description}</p>}
+                                                                <div style={{ display: 'flex', gap: 12, marginTop: 8, marginLeft: 30 }}>
+                                                                    <span style={{ fontSize: 12, color: '#666' }}>👤 {staffInfo?.name || 'Unassigned'}</span>
+                                                                    <span style={{ fontSize: 12, color: isOverdue ? '#ef4444' : '#666' }}>📅 {task.due_date}</span>
+                                                                </div>
+                                                            </div>
+                                                            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                                                                <button onClick={e => { e.stopPropagation(); openEditTask(task); }} title="Edit task" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '4px 6px', color: '#818cf8' }}>✏️</button>
+                                                                <button onClick={e => { e.stopPropagation(); setMessageTask(task); setMessageText(''); setShowMessage(true); }} title="Message staff" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '4px 6px' }}>💬</button>
+                                                                <button onClick={e => { e.stopPropagation(); setDeleteTaskId(task.id); }} title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '4px 6px', color: '#666' }}>🗑️</button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
+
+                                            // Recurring group card
+                                            const first = group.tasks[0];
+                                            const staffInfo = first.staff as unknown as Staff | undefined;
+                                            const groupKey = group.groupId || group.legacyKey || first.id;
+                                            const isExpanded = expandedGroups.has(groupKey);
+                                            const freq = RECURRENCE_OPTIONS.find(o => o.value === first.recurrence_rule?.frequency)?.label || first.recurrence_rule?.frequency || 'Recurring';
+                                            const dates = group.tasks.map(t => t.due_date).sort();
+                                            const todayTasks = group.tasks.filter(t => t.due_date === today);
+                                            const completedCount = group.tasks.filter(t => t.status === 'Completed').length;
+
+                                            return (
+                                                <div key={groupKey} style={{ background: '#111', border: '1px solid #2a2a4a', borderRadius: 12, overflow: 'hidden' }}>
+                                                    <div
+                                                        style={{ padding: 14, cursor: 'pointer', transition: 'background 0.2s' }}
+                                                        onClick={() => {
+                                                            const next = new Set(expandedGroups);
+                                                            if (isExpanded) next.delete(groupKey); else next.add(groupKey);
+                                                            setExpandedGroups(next);
+                                                        }}
+                                                        onMouseEnter={e => (e.currentTarget.style.background = '#1a1a2e')}
+                                                        onMouseLeave={e => (e.currentTarget.style.background = '#111')}
+                                                    >
+                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                                                            <div style={{ flex: 1 }}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+                                                                    <span style={{ fontSize: 16 }}>{isExpanded ? '▼' : '▶'}</span>
+                                                                    <strong style={{ color: '#fff', fontSize: 14 }}>🔄 {first.title}</strong>
+                                                                    <span style={{ padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 600, background: 'rgba(99,102,241,0.15)', color: '#818cf8' }}>
+                                                                        {freq} · {group.tasks.length} instances
+                                                                    </span>
+                                                                    {priorityBadge(first.priority || 'medium')}
+                                                                </div>
+                                                                <div style={{ display: 'flex', gap: 12, marginLeft: 28, flexWrap: 'wrap' }}>
+                                                                    <span style={{ fontSize: 12, color: '#666' }}>👤 {staffInfo?.name || 'Unassigned'}</span>
+                                                                    <span style={{ fontSize: 12, color: '#666' }}>📅 {dates[0]} → {dates[dates.length - 1]}</span>
+                                                                    <span style={{ fontSize: 12, color: '#22c55e' }}>✅ {completedCount}/{group.tasks.length} done</span>
+                                                                    {todayTasks.length > 0 && <span style={{ fontSize: 12, color: '#f0b427', fontWeight: 600 }}>⚡ {todayTasks.length} due today</span>}
+                                                                </div>
+                                                            </div>
+                                                            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                                                                <button onClick={e => { e.stopPropagation(); openEditTask(first, true); }} title="Edit all instances" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '4px 6px', color: '#818cf8' }}>✏️</button>
+                                                                <button onClick={e => { e.stopPropagation(); if (group.groupId) { regenerateGroupDates(group.groupId); } else { regenerateGroupDatesByIds(group.tasks.map(t => t.id)); } }} title="Regenerate dates" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '4px 6px', color: '#22c55e' }}>🔄</button>
+                                                                <button onClick={e => { e.stopPropagation(); if (group.groupId) { setDeleteGroupId(group.groupId); } else { setDeleteGroupId('legacy::' + group.tasks.map(t => t.id).join(',')); } }} title="Delete all instances" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '4px 6px', color: '#ef4444' }}>🗑️</button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {isExpanded && (
+                                                        <div style={{ borderTop: '1px solid #2a2a4a', padding: '8px 14px 14px' }}>
+                                                            <div style={{ fontSize: 11, color: '#666', marginBottom: 6, textAlign: 'right' }}>
+                                                                Showing all {group.tasks.length} instances
+                                                            </div>
+                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 400, overflowY: 'auto' }}>
+                                                                {group.tasks.sort((a, b) => (a.due_date || '').localeCompare(b.due_date || '')).map((task, idx) => {
+                                                                    const tStaff = task.staff as unknown as Staff | undefined;
+                                                                    const isOverdue = task.due_date < today && task.status !== 'Completed';
+                                                                    return (
+                                                                        <div key={task.id} style={{
+                                                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                                                                            background: isOverdue ? 'rgba(239,68,68,0.05)' : '#0a0a0a',
+                                                                            border: `1px solid ${isOverdue ? 'rgba(239,68,68,0.2)' : '#1a1a1a'}`,
+                                                                            borderRadius: 8, padding: '8px 12px', cursor: 'pointer',
+                                                                        }} onClick={() => openEditTask(task)}>
+                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1 }}>
+                                                                                <span style={{ fontSize: 11, color: '#555', minWidth: 20, fontWeight: 700 }}>#{idx + 1}</span>
+                                                                                <button onClick={e => { e.stopPropagation(); toggleComplete(task); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, padding: 0 }}>
+                                                                                    {task.status === 'Completed' ? '✅' : '⬜'}
+                                                                                </button>
+                                                                                <span style={{ fontSize: 12, color: isOverdue ? '#ef4444' : '#999', fontWeight: 600, minWidth: 90 }}>📅 {task.due_date}</span>
+                                                                                {statusBadge(task.status)}
+                                                                                <span style={{ fontSize: 12, color: '#666' }}>👤 {tStaff?.name || 'Unassigned'}</span>
+                                                                            </div>
+                                                                            <button onClick={e => { e.stopPropagation(); setDeleteTaskId(task.id); }} title="Delete this instance" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, padding: '2px 4px', color: '#666' }}>🗑️</button>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                );
+                            })()}
+                        </div>
+                    </div>
+                )}
+
+                {/* ═══ FULL-WIDTH: Assignments Board (staff columns) ═══ */}
+                <div className="tasks-board-panel" style={{ display: activePanel === 'assignments' ? 'block' : 'none' }}>
                     <div className="card" style={{ padding: 20 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
                             <h3 style={{ fontSize: 16, fontWeight: 700, color: '#fff', margin: 0 }}>✅ Assignments Board</h3>
@@ -2065,14 +2275,16 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                 @media (max-width: 768px) {
                     .tasks-grid { grid-template-columns: 1fr !important; }
                     .tasks-library-panel { display: ${activePanel === 'library' ? 'block' : 'none'} !important; }
-                    .tasks-assignments-panel { display: ${activePanel === 'assignments' ? 'block' : 'none'} !important; }
+                    .tasks-assignments-panel { display: ${activePanel === 'library' ? 'block' : 'none'} !important; }
+                    .tasks-board-panel { display: ${activePanel === 'assignments' ? 'block' : 'none'} !important; }
                     .board-columns { flex-direction: column !important; }
                     .board-columns > div { min-width: 100% !important; max-width: 100% !important; flex: 1 1 auto !important; max-height: none !important; }
                 }
                 @media (min-width: 769px) {
                     .mobile-panel-tabs { display: flex !important; }
-                    .tasks-library-panel { display: ${activePanel === 'calendar' || activePanel === 'assignments' ? 'none' : 'block'} !important; }
-                    .tasks-assignments-panel { display: ${activePanel === 'calendar' ? 'none' : activePanel === 'assignments' ? 'block' : 'block'} !important; }
+                    .tasks-library-panel { display: ${activePanel === 'library' ? 'block' : 'none'} !important; }
+                    .tasks-assignments-panel { display: ${activePanel === 'library' ? 'block' : 'none'} !important; }
+                    .tasks-board-panel { display: ${activePanel === 'assignments' ? 'block' : 'none'} !important; }
                 }
                 .board-columns::-webkit-scrollbar { height: 6px; }
                 .board-columns::-webkit-scrollbar-track { background: transparent; }
