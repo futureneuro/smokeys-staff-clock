@@ -52,6 +52,98 @@ const translations: Record<Lang, Record<string, string>> = {
 
         // Language toggle
         langToggle: '🇨🇴 Español',
+
+        // ── Staff portal ──
+        staffPortal: 'Staff Portal',
+        staffLoginEnterBoth: 'Please enter your Staff ID and PIN.',
+        staffLoginFailed: 'Login failed. Please try again.',
+        staffLoginLocked: 'Account temporarily locked',
+        staffLoginRetryIn: 'Retry in',
+        staffLoginSignIn: 'SIGN IN',
+        staffLoginSigningIn: 'Signing in...',
+        staffLoginBackToClock: 'Back to Clock',
+
+        // Dashboard
+        dashTitle: 'Dashboard',
+        dashHome: 'Home',
+        dashHistory: 'History',
+        dashTasks: 'Tasks',
+        dashMessages: 'Messages',
+        dashProfile: 'Profile',
+        dashLogout: 'Logout',
+
+        // Attendance card
+        attTitle: 'Attendance',
+        attCheckedIn: 'Checked In',
+        attCheckedOut: 'Checked Out',
+        attLastCheckIn: 'Last check-in',
+        attCheckInBtn: '✦ CHECK IN',
+        attCheckOutBtn: 'CHECK OUT ✦',
+        attNeedLocation: 'Location needed for check-in/out',
+        attTooFar: 'You are too far from the restaurant',
+
+        // Shift card
+        shiftTitle: "Today's Shift",
+        shiftStart: 'Start',
+        shiftEnd: 'End',
+        shiftRole: 'Role',
+        shiftOnTime: 'On time',
+        shiftLateBy: 'Late by {min} min',
+        shiftNoShift: 'No shift scheduled',
+
+        // Tasks card
+        tasksTitle: "Today's Tasks",
+        tasksDue: 'Due',
+        tasksCompleted: 'Completed',
+        tasksOverdue: 'Overdue',
+        tasksMarkDone: 'Done',
+        tasksNoTasks: 'No tasks for today',
+        tasksViewAll: 'View All Tasks →',
+
+        // Messages card
+        msgTitle: 'Messages',
+        msgUnread: '{count} unread',
+        msgNoMessages: 'No messages',
+        msgOpenInbox: 'Open Inbox →',
+
+        // Alerts card
+        alertsTitle: 'Alerts',
+        alertLate: 'You are late for your shift',
+        alertForgotCheckout: 'You forgot to check out yesterday',
+        alertNoAlerts: 'No alerts',
+
+        // History page
+        histTitle: 'Attendance History',
+        histDate: 'Date',
+        histIn: 'In',
+        histOut: 'Out',
+        histHours: 'Hours',
+        histStatus: 'Status',
+        histLate: 'Late',
+        histAdjusted: 'Adjusted',
+        histStillIn: 'Still In',
+        histNoRecords: 'No attendance records found',
+
+        // Tasks page
+        tasksPageTitle: 'Tasks',
+        tasksTabToday: 'Today',
+        tasksTabUpcoming: 'Upcoming',
+        tasksTabCompleted: 'Completed',
+        tasksEmpty: 'No tasks',
+        tasksDueDate: 'Due: {date}',
+
+        // Messages page
+        msgPageTitle: 'Messages',
+        msgSend: 'Send',
+        msgPlaceholder: 'Type a message...',
+        msgEmpty: 'No messages yet',
+
+        // Profile page
+        profileTitle: 'Profile',
+        profileName: 'Name',
+        profileRole: 'Role',
+        profileStaffId: 'Staff ID',
+        profileLogout: 'LOG OUT',
     },
     es: {
         // Header
@@ -104,6 +196,98 @@ const translations: Record<Lang, Record<string, string>> = {
 
         // Language toggle
         langToggle: '🇺🇸 English',
+
+        // ── Staff portal ──
+        staffPortal: 'Portal de Empleados',
+        staffLoginEnterBoth: 'Ingresa tu ID y PIN.',
+        staffLoginFailed: 'Error al iniciar sesión.',
+        staffLoginLocked: 'Cuenta bloqueada temporalmente',
+        staffLoginRetryIn: 'Reintentar en',
+        staffLoginSignIn: 'INICIAR SESIÓN',
+        staffLoginSigningIn: 'Ingresando...',
+        staffLoginBackToClock: 'Volver al Reloj',
+
+        // Dashboard
+        dashTitle: 'Panel',
+        dashHome: 'Inicio',
+        dashHistory: 'Historial',
+        dashTasks: 'Tareas',
+        dashMessages: 'Mensajes',
+        dashProfile: 'Perfil',
+        dashLogout: 'Salir',
+
+        // Attendance card
+        attTitle: 'Asistencia',
+        attCheckedIn: 'Registrado',
+        attCheckedOut: 'Salida Registrada',
+        attLastCheckIn: 'Última entrada',
+        attCheckInBtn: '✦ ENTRADA',
+        attCheckOutBtn: 'SALIDA ✦',
+        attNeedLocation: 'Se necesita ubicación para registrar',
+        attTooFar: 'Estás muy lejos del restaurante',
+
+        // Shift card
+        shiftTitle: 'Turno de Hoy',
+        shiftStart: 'Inicio',
+        shiftEnd: 'Fin',
+        shiftRole: 'Rol',
+        shiftOnTime: 'A tiempo',
+        shiftLateBy: 'Tarde por {min} min',
+        shiftNoShift: 'Sin turno programado',
+
+        // Tasks card
+        tasksTitle: 'Tareas de Hoy',
+        tasksDue: 'Pendientes',
+        tasksCompleted: 'Completadas',
+        tasksOverdue: 'Vencidas',
+        tasksMarkDone: 'Hecho',
+        tasksNoTasks: 'Sin tareas para hoy',
+        tasksViewAll: 'Ver Todas →',
+
+        // Messages card
+        msgTitle: 'Mensajes',
+        msgUnread: '{count} sin leer',
+        msgNoMessages: 'Sin mensajes',
+        msgOpenInbox: 'Abrir Bandeja →',
+
+        // Alerts card
+        alertsTitle: 'Alertas',
+        alertLate: 'Llegas tarde a tu turno',
+        alertForgotCheckout: 'Olvidaste registrar salida ayer',
+        alertNoAlerts: 'Sin alertas',
+
+        // History page
+        histTitle: 'Historial de Asistencia',
+        histDate: 'Fecha',
+        histIn: 'Entrada',
+        histOut: 'Salida',
+        histHours: 'Horas',
+        histStatus: 'Estado',
+        histLate: 'Tarde',
+        histAdjusted: 'Ajustado',
+        histStillIn: 'Aún Dentro',
+        histNoRecords: 'No se encontraron registros',
+
+        // Tasks page
+        tasksPageTitle: 'Tareas',
+        tasksTabToday: 'Hoy',
+        tasksTabUpcoming: 'Próximas',
+        tasksTabCompleted: 'Completadas',
+        tasksEmpty: 'Sin tareas',
+        tasksDueDate: 'Vence: {date}',
+
+        // Messages page
+        msgPageTitle: 'Mensajes',
+        msgSend: 'Enviar',
+        msgPlaceholder: 'Escribe un mensaje...',
+        msgEmpty: 'Sin mensajes aún',
+
+        // Profile page
+        profileTitle: 'Perfil',
+        profileName: 'Nombre',
+        profileRole: 'Rol',
+        profileStaffId: 'ID de Empleado',
+        profileLogout: 'CERRAR SESIÓN',
     },
 };
 
