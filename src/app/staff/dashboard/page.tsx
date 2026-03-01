@@ -90,6 +90,13 @@ export default function StaffDashboard() {
     const [commentPreview, setCommentPreview] = useState<string | null>(null);
     const commentFileRef = useRef<HTMLInputElement>(null);
 
+    // Auto clock-out correction
+    const [autoClockOutLog, setAutoClockOutLog] = useState<TimeLog | null>(null);
+    const [showClockOutCorrection, setShowClockOutCorrection] = useState(false);
+    const [correctionTime, setCorrectionTime] = useState('');
+    const [correctionSaving, setCorrectionSaving] = useState(false);
+    const autoClockOutProcessed = useRef<Set<string>>(new Set());
+
     useEffect(() => {
         const saved = localStorage.getItem('smokeys_lang') as Lang | null;
         if (saved === 'en' || saved === 'es') setLang(saved);
@@ -118,7 +125,36 @@ export default function StaffDashboard() {
             .is('check_out', null)
             .order('check_in', { ascending: false })
             .limit(1);
-        setOpenLog(logs && logs.length > 0 ? logs[0] : null);
+        const currentOpenLog = logs && logs.length > 0 ? logs[0] : null;
+
+        // Auto clock-out if checked in for more than 10 hours
+        if (currentOpenLog && !autoClockOutProcessed.current.has(currentOpenLog.id)) {
+            const checkInTime = new Date(currentOpenLog.check_in).getTime();
+            const now = Date.now();
+            const hoursDiff = (now - checkInTime) / (1000 * 60 * 60);
+            if (hoursDiff >= 10) {
+                autoClockOutProcessed.current.add(currentOpenLog.id);
+                // Auto clock out at the check-in time + 10 hours
+                const autoCheckOut = new Date(checkInTime + 10 * 60 * 60 * 1000);
+                const totalHrs = 10;
+                await supabase
+                    .from('time_logs')
+                    .update({
+                        check_out: autoCheckOut.toISOString(),
+                        total_hours: totalHrs,
+                    })
+                    .eq('id', currentOpenLog.id);
+                setAutoClockOutLog({ ...currentOpenLog, check_out: autoCheckOut.toISOString(), total_hours: totalHrs });
+                setShowClockOutCorrection(true);
+                setOpenLog(null);
+                // Set a default correction time suggestion
+                const suggestedHour = autoCheckOut.getHours().toString().padStart(2, '0');
+                const suggestedMin = autoCheckOut.getMinutes().toString().padStart(2, '0');
+                setCorrectionTime(`${suggestedHour}:${suggestedMin}`);
+                return; // re-fetch will happen after correction
+            }
+        }
+        setOpenLog(currentOpenLog);
 
         // Today's shift
         const { data: shifts } = await supabase
@@ -166,6 +202,11 @@ export default function StaffDashboard() {
             .limit(1);
         if (yLogs && yLogs.length > 0) {
             newAlerts.push(t(lang, 'alertForgotCheckout'));
+        }
+
+        // Alert if auto clock-out correction is pending
+        if (showClockOutCorrection && autoClockOutLog) {
+            newAlerts.push('⏰ You were auto-clocked out after 10+ hours. Please correct your clock-out time.');
         }
         setAlerts(newAlerts);
     }, [session, today, lang]);
@@ -260,6 +301,39 @@ export default function StaffDashboard() {
             setClockError(result.error || 'Failed');
         }
         setClockLoading(false);
+    }
+
+    async function handleClockOutCorrection() {
+        if (!autoClockOutLog || !correctionTime) return;
+        setCorrectionSaving(true);
+        try {
+            // Build the corrected check-out datetime: use check-in date + correction time
+            const checkInDate = new Date(autoClockOutLog.check_in);
+            const [cHour, cMin] = correctionTime.split(':').map(Number);
+            const correctedCheckOut = new Date(checkInDate);
+            correctedCheckOut.setHours(cHour, cMin, 0, 0);
+            // If correction time is before check-in time, assume it's next day
+            if (correctedCheckOut <= checkInDate) {
+                correctedCheckOut.setDate(correctedCheckOut.getDate() + 1);
+            }
+            const totalHrs = (correctedCheckOut.getTime() - checkInDate.getTime()) / (1000 * 60 * 60);
+            await supabase
+                .from('time_logs')
+                .update({
+                    check_out: correctedCheckOut.toISOString(),
+                    total_hours: Math.round(totalHrs * 100) / 100,
+                })
+                .eq('id', autoClockOutLog.id);
+            setShowClockOutCorrection(false);
+            setAutoClockOutLog(null);
+            setCorrectionTime('');
+            setClockSuccess('Clock-out time corrected successfully!');
+            setTimeout(() => setClockSuccess(''), 5000);
+            fetchDashboardData();
+        } catch {
+            setClockError('Failed to correct clock-out time');
+        }
+        setCorrectionSaving(false);
     }
 
     async function markTaskDone(taskId: string) {
@@ -431,6 +505,65 @@ export default function StaffDashboard() {
                     )}
                 </div>
 
+                {/* Auto Clock-Out Correction Card */}
+                {showClockOutCorrection && autoClockOutLog && (
+                    <div style={{ ...styles.card, borderColor: '#ef4444', borderWidth: 1, borderStyle: 'solid' }}>
+                        <div style={styles.cardHeader}>
+                            <span style={styles.cardIcon}>⏰</span>
+                            <h3 style={{ ...styles.cardTitle, color: '#ef4444' }}>Auto Clock-Out</h3>
+                        </div>
+                        <p style={{ color: '#ccc', fontSize: 13, margin: '0 0 8px', lineHeight: 1.5 }}>
+                            You were checked in for more than 10 hours and were automatically clocked out. Please enter your actual clock-out time below.
+                        </p>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#888' }}>
+                                <span>Checked in:</span>
+                                <span style={{ color: '#fff' }}>{formatTimeMedellin(autoClockOutLog.check_in, lang)}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#888' }}>
+                                <span>Auto clocked out at:</span>
+                                <span style={{ color: '#ef4444' }}>{autoClockOutLog.check_out ? formatTimeMedellin(autoClockOutLog.check_out, lang) : '—'}</span>
+                            </div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                            <label style={{ color: '#999', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>Actual clock-out:</label>
+                            <input
+                                type="time"
+                                value={correctionTime}
+                                onChange={e => setCorrectionTime(e.target.value)}
+                                style={{
+                                    flex: 1,
+                                    padding: '8px 12px',
+                                    background: '#111',
+                                    borderWidth: '1px',
+                                    borderStyle: 'solid',
+                                    borderColor: '#333',
+                                    borderRadius: 8,
+                                    color: '#fff',
+                                    fontSize: 14,
+                                }}
+                            />
+                        </div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                            <button
+                                onClick={handleClockOutCorrection}
+                                disabled={correctionSaving || !correctionTime}
+                                className="btn-primary"
+                                style={{ flex: 1 }}
+                            >
+                                {correctionSaving ? '...' : '✓ Submit Correct Time'}
+                            </button>
+                            <button
+                                onClick={() => { setShowClockOutCorrection(false); setAutoClockOutLog(null); fetchDashboardData(); }}
+                                className="btn-secondary"
+                                style={{ flex: 0, padding: '8px 16px', whiteSpace: 'nowrap' }}
+                            >
+                                Dismiss
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 {/* Shift Card */}
                 <div style={styles.card}>
                     <div style={styles.cardHeader}>
@@ -483,17 +616,27 @@ export default function StaffDashboard() {
                                     <span style={styles.taskCountLabel}>{t(lang, 'tasksOverdue')}</span>
                                 </div>
                             </div>
-                            {dueTasks.slice(0, 3).map(task => (
-                                <div key={task.id} style={styles.taskItem}>
-                                    <span style={styles.taskName}>{task.title}</span>
-                                    <button
-                                        onClick={() => markTaskDone(task.id)}
-                                        style={styles.taskDoneBtn}
-                                    >
-                                        {t(lang, 'tasksMarkDone')}
-                                    </button>
-                                </div>
-                            ))}
+                            {dueTasks.slice(0, 3).map(task => {
+                                const statusDef = customStatuses.find(s => s.label === task.status);
+                                const badgeBg = statusDef?.color ? `${statusDef.color}22` : 'rgba(240,180,39,0.15)';
+                                const badgeColor = statusDef?.color || '#f0b427';
+                                return (
+                                    <div key={task.id} style={styles.taskItem} onClick={() => { setViewingTask(task); fetchComments(task.id); }}>
+                                        <span style={styles.taskName}>{task.title}</span>
+                                        <span style={{
+                                            padding: '3px 10px',
+                                            borderRadius: 12,
+                                            fontSize: 11,
+                                            fontWeight: 600,
+                                            background: badgeBg,
+                                            color: badgeColor,
+                                            textTransform: 'capitalize' as const,
+                                        }}>
+                                            {task.status}
+                                        </span>
+                                    </div>
+                                );
+                            })}
                             <button onClick={() => setActiveTab('tasks')} style={styles.linkBtn}>
                                 {t(lang, 'tasksViewAll')}
                             </button>
@@ -599,14 +742,30 @@ export default function StaffDashboard() {
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                 <span style={{ fontSize: 12, color: '#818cf8' }}>💬</span>
-                                {task.status !== 'Completed' && (
-                                    <button onClick={e => { e.stopPropagation(); markTaskDone(task.id); }} style={styles.taskDoneBtn}>
-                                        {t(lang, 'tasksMarkDone')}
-                                    </button>
-                                )}
-                                {task.status === 'Completed' && (
-                                    <span style={{ color: '#22c55e', fontSize: 13, fontWeight: 600 }}>✓</span>
-                                )}
+                                {(() => {
+                                    const statusDef = customStatuses.find(s => s.label === task.status);
+                                    const bgColor = task.status === 'Completed'
+                                        ? 'rgba(34,197,94,0.15)'
+                                        : statusDef?.color
+                                            ? `${statusDef.color}22`
+                                            : 'rgba(240,180,39,0.15)';
+                                    const textColor = task.status === 'Completed'
+                                        ? '#22c55e'
+                                        : statusDef?.color || '#f0b427';
+                                    return (
+                                        <span style={{
+                                            padding: '3px 10px',
+                                            borderRadius: 12,
+                                            fontSize: 11,
+                                            fontWeight: 600,
+                                            background: bgColor,
+                                            color: textColor,
+                                            whiteSpace: 'nowrap',
+                                        }}>
+                                            {task.status === 'Completed' ? '✓ ' : ''}{task.status}
+                                        </span>
+                                    );
+                                })()}
                             </div>
                         </div>
                     ))
@@ -617,7 +776,7 @@ export default function StaffDashboard() {
                 {/* Task Detail + Comments Modal */}
                 {viewingTask && (
                     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 }}>
-                        <div style={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 16, maxWidth: 480, width: '100%', padding: 24, maxHeight: '85vh', overflowY: 'auto' }}>
+                        <div style={{ background: '#1a1a2e', borderWidth: 1, borderStyle: 'solid', borderColor: '#2a2a4a', borderRadius: 16, maxWidth: 480, width: '100%', padding: 24, maxHeight: '85vh', overflowY: 'auto' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
                                 <div style={{ flex: 1 }}>
                                     <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, margin: 0 }}>{viewingTask.title}</h3>
@@ -644,7 +803,7 @@ export default function StaffDashboard() {
                                         flex: 1,
                                         padding: '8px 12px',
                                         background: '#111',
-                                        border: '1px solid #333',
+                                        borderWidth: 1, borderStyle: 'solid', borderColor: '#333',
                                         borderRadius: 8,
                                         color: '#fff',
                                         fontSize: 13,
@@ -684,7 +843,7 @@ export default function StaffDashboard() {
                                                 {c.content && <p style={{ color: '#ccc', fontSize: 13, margin: 0, lineHeight: 1.4 }}>{c.content}</p>}
                                                 {c.attachment_url && (
                                                     <div style={{ marginTop: 6 }}>
-                                                        <img src={c.attachment_url} alt="attachment" style={{ maxWidth: '100%', maxHeight: 160, borderRadius: 8, border: '1px solid #333', cursor: 'pointer' }} onClick={() => window.open(c.attachment_url!, '_blank')} />
+                                                        <img src={c.attachment_url} alt="attachment" style={{ maxWidth: '100%', maxHeight: 160, borderRadius: 8, borderWidth: 1, borderStyle: 'solid', borderColor: '#333', cursor: 'pointer' }} onClick={() => window.open(c.attachment_url!, '_blank')} />
                                                     </div>
                                                 )}
                                             </div>
@@ -695,13 +854,13 @@ export default function StaffDashboard() {
                                 {/* Comment Input */}
                                 {commentPreview && (
                                     <div style={{ position: 'relative', marginBottom: 8 }}>
-                                        <img src={commentPreview} alt="preview" style={{ maxHeight: 80, borderRadius: 8, border: '1px solid #333' }} />
-                                        <button onClick={() => { setCommentFile(null); setCommentPreview(null); }} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.7)', border: 'none', color: '#fff', borderRadius: '50%', width: 20, height: 20, cursor: 'pointer', fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+                                        <img src={commentPreview} alt="preview" style={{ maxHeight: 80, borderRadius: 8, borderWidth: 1, borderStyle: 'solid', borderColor: '#333' }} />
+                                        <button onClick={() => { setCommentFile(null); setCommentPreview(null); }} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.7)', borderWidth: 0, borderStyle: 'none', color: '#fff', borderRadius: '50%', width: 20, height: 20, cursor: 'pointer', fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
                                     </div>
                                 )}
                                 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                                     <input type="file" ref={commentFileRef} accept="image/*" onChange={handleCommentFile} style={{ display: 'none' }} />
-                                    <button onClick={() => commentFileRef.current?.click()} title="Attach image" style={{ background: 'rgba(129,140,248,0.1)', border: '1px solid #333', borderRadius: 8, padding: '8px 10px', color: '#818cf8', cursor: 'pointer', fontSize: 14, flexShrink: 0 }}>📎</button>
+                                    <button onClick={() => commentFileRef.current?.click()} title="Attach image" style={{ background: 'rgba(129,140,248,0.1)', borderWidth: 1, borderStyle: 'solid', borderColor: '#333', borderRadius: 8, padding: '8px 10px', color: '#818cf8', cursor: 'pointer', fontSize: 14, flexShrink: 0 }}>📎</button>
                                     <input className="input-field" value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="Write a comment..." onKeyDown={e => e.key === 'Enter' && !e.shiftKey && postComment()} style={{ flex: 1, minWidth: 0, width: 'auto', fontSize: 12, padding: '8px 12px' }} />
                                     <button onClick={postComment} disabled={commentSending || (!commentText.trim() && !commentFile)} className="btn-primary" style={{ width: 'auto', padding: '8px 14px', fontSize: 12, flexShrink: 0 }}>
                                         {commentSending ? '...' : '📤'}
@@ -859,7 +1018,9 @@ const styles: Record<string, React.CSSProperties> = {
     logoutBtn: {
         background: 'rgba(239,68,68,0.1)',
         color: '#ef4444',
-        border: '1px solid rgba(239,68,68,0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: 'rgba(239,68,68,0.2)',
         borderRadius: '8px',
         padding: '6px 12px',
         fontSize: '12px',
@@ -880,7 +1041,9 @@ const styles: Record<string, React.CSSProperties> = {
     },
     card: {
         background: '#1a1a1a',
-        border: '1px solid #2a2a2a',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: '#2a2a2a',
         borderRadius: '16px',
         padding: '20px',
     },
@@ -919,7 +1082,9 @@ const styles: Record<string, React.CSSProperties> = {
     successBanner: {
         padding: '10px 14px',
         background: 'rgba(34,197,94,0.1)',
-        border: '1px solid rgba(34,197,94,0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: 'rgba(34,197,94,0.2)',
         borderRadius: '10px',
         color: '#22c55e',
         fontSize: '13px',
@@ -928,7 +1093,9 @@ const styles: Record<string, React.CSSProperties> = {
     errorBanner: {
         padding: '10px 14px',
         background: 'rgba(239,68,68,0.1)',
-        border: '1px solid rgba(239,68,68,0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: 'rgba(239,68,68,0.2)',
         borderRadius: '10px',
         color: '#ef4444',
         fontSize: '13px',
@@ -937,7 +1104,9 @@ const styles: Record<string, React.CSSProperties> = {
     warningBanner: {
         padding: '10px 14px',
         background: 'rgba(240,180,39,0.08)',
-        border: '1px solid rgba(240,180,39,0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: 'rgba(240,180,39,0.2)',
         borderRadius: '10px',
         color: '#f0b427',
         fontSize: '13px',
@@ -1001,7 +1170,9 @@ const styles: Record<string, React.CSSProperties> = {
     taskDoneBtn: {
         background: 'rgba(34,197,94,0.1)',
         color: '#22c55e',
-        border: '1px solid rgba(34,197,94,0.2)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: 'rgba(34,197,94,0.2)',
         borderRadius: '8px',
         padding: '4px 12px',
         fontSize: '12px',
@@ -1010,7 +1181,8 @@ const styles: Record<string, React.CSSProperties> = {
     },
     linkBtn: {
         background: 'none',
-        border: 'none',
+        borderWidth: 0,
+        borderStyle: 'none',
         color: '#f0b427',
         fontSize: '13px',
         fontWeight: 600,
@@ -1037,7 +1209,9 @@ const styles: Record<string, React.CSSProperties> = {
     alertItem: {
         padding: '8px 12px',
         background: 'rgba(239,68,68,0.08)',
-        border: '1px solid rgba(239,68,68,0.15)',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: 'rgba(239,68,68,0.15)',
         borderRadius: '8px',
         color: '#ef4444',
         fontSize: '13px',
@@ -1120,7 +1294,9 @@ const styles: Record<string, React.CSSProperties> = {
         gap: '12px',
         padding: '14px 16px',
         background: '#1a1a1a',
-        border: '1px solid #2a2a2a',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: '#2a2a2a',
         borderRadius: '12px',
         flexWrap: 'wrap' as const,
     },
@@ -1164,7 +1340,9 @@ const styles: Record<string, React.CSSProperties> = {
         flex: 1,
         padding: '10px',
         background: 'transparent',
-        border: '1px solid #333',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: '#333',
         borderRadius: '10px',
         color: '#999',
         fontSize: '13px',
@@ -1182,7 +1360,9 @@ const styles: Record<string, React.CSSProperties> = {
         justifyContent: 'space-between',
         padding: '14px 16px',
         background: '#1a1a1a',
-        border: '1px solid #2a2a2a',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: '#2a2a2a',
         borderRadius: '12px',
     },
     taskCardTitle: {
@@ -1209,7 +1389,8 @@ const styles: Record<string, React.CSSProperties> = {
     msgBubble: {
         padding: '12px 16px',
         borderRadius: '16px',
-        border: '1px solid',
+        borderWidth: '1px',
+        borderStyle: 'solid',
         maxWidth: '85%',
     },
     msgText: {
@@ -1228,7 +1409,9 @@ const styles: Record<string, React.CSSProperties> = {
     profileCard: {
         padding: '32px 24px',
         background: '#1a1a1a',
-        border: '1px solid #2a2a2a',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: '#2a2a2a',
         borderRadius: '20px',
         textAlign: 'center' as const,
     },
