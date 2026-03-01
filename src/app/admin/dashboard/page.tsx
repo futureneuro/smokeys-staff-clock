@@ -32,7 +32,7 @@ interface TimeLog {
     staff?: Staff;
 }
 
-type Tab = 'staff' | 'logs' | 'reports' | 'tasks' | 'qrcode' | 'settings';
+type Tab = 'staff' | 'logs' | 'reports' | 'tasks' | 'shifts' | 'qrcode' | 'settings';
 
 export default function AdminDashboard() {
     const router = useRouter();
@@ -227,7 +227,7 @@ export default function AdminDashboard() {
 
             {/* Tabs */}
             <nav style={styles.tabs}>
-                {(['staff', 'logs', 'reports', 'tasks', 'qrcode', 'settings'] as Tab[]).map(tab => (
+                {(['staff', 'logs', 'reports', 'tasks', 'shifts', 'qrcode', 'settings'] as Tab[]).map(tab => (
                     <button
                         key={tab}
                         onClick={() => setActiveTab(tab)}
@@ -236,7 +236,7 @@ export default function AdminDashboard() {
                             ...(activeTab === tab ? styles.tabActive : {}),
                         }}
                     >
-                        {tab === 'staff' ? '👥 Staff' : tab === 'logs' ? '📋 Time Logs' : tab === 'reports' ? '📊 Reports' : tab === 'tasks' ? '✅ Tasks' : tab === 'qrcode' ? '📱 QR Code' : '⚙️ Settings'}
+                        {tab === 'staff' ? '👥 Staff' : tab === 'logs' ? '📋 Time Logs' : tab === 'reports' ? '📊 Reports' : tab === 'tasks' ? '✅ Tasks' : tab === 'shifts' ? '📅 Shifts' : tab === 'qrcode' ? '📱 QR Code' : '⚙️ Settings'}
                     </button>
                 ))}
             </nav>
@@ -486,6 +486,11 @@ export default function AdminDashboard() {
                 {/* ── TASKS TAB ── */}
                 {activeTab === 'tasks' && (
                     <TasksPanel staffList={staffList} adminId={admin?.id || ''} />
+                )}
+
+                {/* ── SHIFTS TAB ── */}
+                {activeTab === 'shifts' && (
+                    <ShiftsPanel staffList={staffList} />
                 )}
 
                 {/* ── QR CODE TAB ── */}
@@ -2294,6 +2299,366 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
     );
 }
 
+
+interface ShiftDefinition {
+    id: string;
+    name: string;
+    start_time: string;
+    end_time: string;
+    color: string;
+    created_at: string;
+}
+
+interface ShiftAssignment {
+    id: string;
+    shift_definition_id: string;
+    staff_id: string;
+    shift_date: string;
+    shift_definition?: ShiftDefinition;
+    staff?: { id: string; name: string; staff_code: string };
+}
+
+function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
+    const [shiftDefs, setShiftDefs] = useState<ShiftDefinition[]>([]);
+    const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
+    const [showForm, setShowForm] = useState(false);
+    const [editingShift, setEditingShift] = useState<ShiftDefinition | null>(null);
+    const [form, setForm] = useState({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427' });
+    const [saving, setSaving] = useState(false);
+    const [weekOffset, setWeekOffset] = useState(0);
+    const [deleteId, setDeleteId] = useState<string | null>(null);
+
+    const activeStaff = staffList.filter(s => s.active && s.role === 'staff');
+
+    // Get week dates
+    const getWeekDates = useCallback(() => {
+        const now = new Date();
+        const monday = new Date(now);
+        monday.setDate(now.getDate() - ((now.getDay() + 6) % 7) + weekOffset * 7);
+        monday.setHours(0, 0, 0, 0);
+        return Array.from({ length: 7 }, (_, i) => {
+            const d = new Date(monday);
+            d.setDate(monday.getDate() + i);
+            return d.toISOString().slice(0, 10);
+        });
+    }, [weekOffset]);
+
+    const weekDates = getWeekDates();
+    const weekStart = weekDates[0];
+    const weekEnd = weekDates[6];
+
+    const fetchShiftDefs = useCallback(async () => {
+        const { data } = await supabase.from('shift_definitions').select('*').order('start_time');
+        if (data) setShiftDefs(data);
+    }, []);
+
+    const fetchAssignments = useCallback(async () => {
+        const { data } = await supabase
+            .from('shift_assignments')
+            .select('*, shift_definition:shift_definitions(*), staff:staff(id, name, staff_code)')
+            .gte('shift_date', weekStart)
+            .lte('shift_date', weekEnd);
+        if (data) setAssignments(data);
+    }, [weekStart, weekEnd]);
+
+    useEffect(() => { fetchShiftDefs(); }, [fetchShiftDefs]);
+    useEffect(() => { fetchAssignments(); }, [fetchAssignments]);
+
+    async function saveShiftDef(e: React.FormEvent) {
+        e.preventDefault();
+        setSaving(true);
+        if (editingShift) {
+            await supabase.from('shift_definitions').update({
+                name: form.name, start_time: form.start_time, end_time: form.end_time, color: form.color,
+            }).eq('id', editingShift.id);
+        } else {
+            await supabase.from('shift_definitions').insert({
+                name: form.name, start_time: form.start_time, end_time: form.end_time, color: form.color,
+            });
+        }
+        setSaving(false);
+        setShowForm(false);
+        setEditingShift(null);
+        setForm({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427' });
+        fetchShiftDefs();
+    }
+
+    async function deleteShiftDef(id: string) {
+        await supabase.from('shift_definitions').delete().eq('id', id);
+        setDeleteId(null);
+        fetchShiftDefs();
+        fetchAssignments();
+    }
+
+    async function toggleAssignment(shiftDefId: string, staffId: string, date: string) {
+        const existing = assignments.find(
+            a => a.shift_definition_id === shiftDefId && a.staff_id === staffId && a.shift_date === date
+        );
+        if (existing) {
+            await supabase.from('shift_assignments').delete().eq('id', existing.id);
+        } else {
+            await supabase.from('shift_assignments').insert({
+                shift_definition_id: shiftDefId, staff_id: staffId, shift_date: date,
+            });
+        }
+        fetchAssignments();
+    }
+
+    async function copyWeekToNext() {
+        const nextWeekDates = Array.from({ length: 7 }, (_, i) => {
+            const d = new Date(weekDates[0]);
+            d.setDate(d.getDate() + 7 + i);
+            return d.toISOString().slice(0, 10);
+        });
+        const inserts = assignments.map((a, idx) => ({
+            shift_definition_id: a.shift_definition_id,
+            staff_id: a.staff_id,
+            shift_date: nextWeekDates[weekDates.indexOf(a.shift_date)] || nextWeekDates[new Date(a.shift_date).getDay() === 0 ? 6 : new Date(a.shift_date).getDay() - 1],
+        })).filter(ins => ins.shift_date);
+        if (inserts.length > 0) {
+            await supabase.from('shift_assignments').upsert(inserts, { onConflict: 'shift_definition_id,staff_id,shift_date' });
+            setWeekOffset(weekOffset + 1);
+        }
+    }
+
+    function isAssigned(shiftDefId: string, staffId: string, date: string) {
+        return assignments.some(
+            a => a.shift_definition_id === shiftDefId && a.staff_id === staffId && a.shift_date === date
+        );
+    }
+
+    function getAssignedStaff(shiftDefId: string, date: string) {
+        return assignments
+            .filter(a => a.shift_definition_id === shiftDefId && a.shift_date === date)
+            .map(a => activeStaff.find(s => s.id === a.staff_id))
+            .filter(Boolean) as Staff[];
+    }
+
+    const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    // Selected shift for scheduler
+    const [selectedShiftId, setSelectedShiftId] = useState<string | null>(null);
+    useEffect(() => {
+        if (shiftDefs.length > 0 && !selectedShiftId) setSelectedShiftId(shiftDefs[0].id);
+    }, [shiftDefs, selectedShiftId]);
+
+    const selectedShift = shiftDefs.find(s => s.id === selectedShiftId);
+
+    return (
+        <div className="animate-fadeIn">
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+                <h2 style={styles.sectionTitle}>Shift Management</h2>
+                <button onClick={() => { setShowForm(true); setEditingShift(null); setForm({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427' }); }} className="btn-primary" style={{ width: 'auto', padding: '10px 20px', fontSize: 13 }}>
+                    + New Shift
+                </button>
+            </div>
+
+            {/* Shift Definitions */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12, marginBottom: 28 }}>
+                {shiftDefs.length === 0 ? (
+                    <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '40px 20px', color: '#666' }}>
+                        <p style={{ fontSize: 32, marginBottom: 8 }}>📅</p>
+                        <p style={{ fontSize: 14 }}>No shifts defined yet. Create your first shift to get started.</p>
+                    </div>
+                ) : shiftDefs.map(sd => (
+                    <div key={sd.id} style={{
+                        background: selectedShiftId === sd.id ? 'rgba(240,180,39,0.08)' : '#1a1a1a',
+                        borderWidth: 1, borderStyle: 'solid',
+                        borderColor: selectedShiftId === sd.id ? '#f0b427' : '#2a2a2a',
+                        borderRadius: 14, padding: 16, cursor: 'pointer', transition: 'all 0.2s',
+                    }} onClick={() => setSelectedShiftId(sd.id)}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                            <span style={{ width: 12, height: 12, borderRadius: '50%', background: sd.color, flexShrink: 0 }} />
+                            <span style={{ color: '#fff', fontSize: 14, fontWeight: 700, flex: 1 }}>{sd.name}</span>
+                            <div style={{ display: 'flex', gap: 4 }}>
+                                <button onClick={e => { e.stopPropagation(); setEditingShift(sd); setForm({ name: sd.name, start_time: sd.start_time.slice(0, 5), end_time: sd.end_time.slice(0, 5), color: sd.color }); setShowForm(true); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>✏️</button>
+                                <button onClick={e => { e.stopPropagation(); setDeleteId(sd.id); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>🗑️</button>
+                            </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 12, fontSize: 12, color: '#888' }}>
+                            <span>🕐 {sd.start_time.slice(0, 5)}</span>
+                            <span>→</span>
+                            <span>{sd.end_time.slice(0, 5)}</span>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Weekly Scheduler */}
+            {selectedShift && (
+                <div style={{ background: '#1a1a1a', borderRadius: 16, borderWidth: 1, borderStyle: 'solid', borderColor: '#2a2a2a', padding: 20, marginBottom: 24 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <span style={{ width: 10, height: 10, borderRadius: '50%', background: selectedShift.color }} />
+                            <h3 style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: 0 }}>
+                                {selectedShift.name} — {selectedShift.start_time.slice(0, 5)} to {selectedShift.end_time.slice(0, 5)}
+                            </h3>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <button onClick={() => setWeekOffset(weekOffset - 1)} style={{ background: '#222', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', color: '#ccc', cursor: 'pointer', fontSize: 13 }}>← Prev</button>
+                            <button onClick={() => setWeekOffset(0)} style={{ background: weekOffset === 0 ? 'rgba(240,180,39,0.15)' : '#222', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', color: weekOffset === 0 ? '#f0b427' : '#ccc', cursor: 'pointer', fontSize: 13, fontWeight: weekOffset === 0 ? 700 : 400 }}>This Week</button>
+                            <button onClick={() => setWeekOffset(weekOffset + 1)} style={{ background: '#222', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', color: '#ccc', cursor: 'pointer', fontSize: 13 }}>Next →</button>
+                        </div>
+                    </div>
+
+                    {/* Scheduler grid */}
+                    <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 600 }}>
+                            <thead>
+                                <tr>
+                                    <th style={{ padding: '10px 12px', textAlign: 'left', color: '#666', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #2a2a2a', width: 140 }}>Staff</th>
+                                    {weekDates.map((date, i) => {
+                                        const isToday = date === todayStr;
+                                        return (
+                                            <th key={date} style={{ padding: '10px 8px', textAlign: 'center', borderBottom: '1px solid #2a2a2a', background: isToday ? 'rgba(240,180,39,0.06)' : 'transparent' }}>
+                                                <div style={{ color: isToday ? '#f0b427' : '#888', fontSize: 11, fontWeight: 600 }}>{dayNames[i]}</div>
+                                                <div style={{ color: isToday ? '#f0b427' : '#555', fontSize: 10 }}>{date.slice(5)}</div>
+                                            </th>
+                                        );
+                                    })}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {activeStaff.map(staff => (
+                                    <tr key={staff.id}>
+                                        <td style={{ padding: '8px 12px', color: '#ccc', fontSize: 13, fontWeight: 500, borderBottom: '1px solid #1f1f1f' }}>
+                                            {staff.name}
+                                        </td>
+                                        {weekDates.map(date => {
+                                            const assigned = isAssigned(selectedShift.id, staff.id, date);
+                                            const isToday = date === todayStr;
+                                            return (
+                                                <td key={date} style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #1f1f1f', background: isToday ? 'rgba(240,180,39,0.03)' : 'transparent' }}>
+                                                    <button
+                                                        onClick={() => toggleAssignment(selectedShift.id, staff.id, date)}
+                                                        style={{
+                                                            width: 36, height: 36, borderRadius: 10,
+                                                            border: assigned ? 'none' : '2px dashed #333',
+                                                            background: assigned ? selectedShift.color : 'transparent',
+                                                            cursor: 'pointer', fontSize: 14,
+                                                            transition: 'all 0.15s', opacity: assigned ? 1 : 0.5,
+                                                            color: assigned ? '#000' : '#555',
+                                                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                                        }}
+                                                        title={assigned ? 'Click to remove' : 'Click to assign'}
+                                                    >
+                                                        {assigned ? '✓' : '+'}
+                                                    </button>
+                                                </td>
+                                            );
+                                        })}
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* Copy week */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+                        <button onClick={copyWeekToNext} className="btn-secondary" style={{ padding: '8px 16px', fontSize: 12 }}>📋 Copy Week → Next Week</button>
+                    </div>
+                </div>
+            )}
+
+            {/* Day summary */}
+            <div style={{ background: '#1a1a1a', borderRadius: 16, borderWidth: 1, borderStyle: 'solid', borderColor: '#2a2a2a', padding: 20 }}>
+                <h3 style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: '0 0 16px' }}>📋 Week Overview</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
+                    {weekDates.map((date, i) => {
+                        const isToday = date === todayStr;
+                        const dayAssignments = assignments.filter(a => a.shift_date === date);
+                        return (
+                            <div key={date} style={{
+                                background: isToday ? 'rgba(240,180,39,0.06)' : '#111',
+                                borderWidth: 1, borderStyle: 'solid',
+                                borderColor: isToday ? 'rgba(240,180,39,0.3)' : '#222',
+                                borderRadius: 12, padding: 12,
+                            }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: isToday ? '#f0b427' : '#888', marginBottom: 6 }}>
+                                    {dayNames[i]} {date.slice(5)}
+                                </div>
+                                {dayAssignments.length === 0 ? (
+                                    <p style={{ color: '#444', fontSize: 11, margin: 0 }}>No shifts</p>
+                                ) : (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                        {shiftDefs.map(sd => {
+                                            const assigned = getAssignedStaff(sd.id, date);
+                                            if (assigned.length === 0) return null;
+                                            return (
+                                                <div key={sd.id}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
+                                                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: sd.color }} />
+                                                        <span style={{ fontSize: 10, color: '#999', fontWeight: 600 }}>{sd.name}</span>
+                                                    </div>
+                                                    {assigned.map(s => (
+                                                        <div key={s.id} style={{ fontSize: 10, color: '#666', paddingLeft: 10 }}>{s.name}</div>
+                                                    ))}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            {/* Create/Edit Shift Modal */}
+            {showForm && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 }}>
+                    <div className="card" style={{ maxWidth: 400, width: '100%', padding: 24 }}>
+                        <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
+                            {editingShift ? '✏️ Edit Shift' : '📅 New Shift Definition'}
+                        </h3>
+                        <form onSubmit={saveShiftDef}>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Name</label>
+                            <input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. Morning, Afternoon, Night" required style={{ marginBottom: 12 }} />
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Start Time</label>
+                                    <input className="input-field" type="time" value={form.start_time} onChange={e => setForm({ ...form, start_time: e.target.value })} required style={{ colorScheme: 'dark' }} />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>End Time</label>
+                                    <input className="input-field" type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} required style={{ colorScheme: 'dark' }} />
+                                </div>
+                            </div>
+                            <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Color</label>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                                <input type="color" value={form.color} onChange={e => setForm({ ...form, color: e.target.value })} style={{ width: 40, height: 40, border: 'none', borderRadius: 8, cursor: 'pointer', background: 'none' }} />
+                                <span style={{ fontSize: 12, color: '#888' }}>{form.color}</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <button type="submit" className="btn-primary" disabled={saving} style={{ flex: 1, padding: 12 }}>
+                                    {saving ? 'Saving...' : editingShift ? '💾 Update Shift' : '📅 Create Shift'}
+                                </button>
+                                <button type="button" onClick={() => { setShowForm(false); setEditingShift(null); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Delete Confirmation */}
+            {deleteId && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 }}>
+                    <div className="card" style={{ maxWidth: 360, width: '100%', padding: 24, textAlign: 'center' }}>
+                        <p style={{ fontSize: 32, marginBottom: 8 }}>🗑️</p>
+                        <p style={{ color: '#fff', fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Delete this shift?</p>
+                        <p style={{ color: '#888', fontSize: 12, marginBottom: 16 }}>All assignments for this shift will also be removed.</p>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                            <button onClick={() => deleteShiftDef(deleteId)} style={{ flex: 1, padding: 12, background: '#ef4444', border: 'none', borderRadius: 10, color: '#fff', fontWeight: 600, cursor: 'pointer' }}>Delete</button>
+                            <button onClick={() => setDeleteId(null)} className="btn-secondary" style={{ flex: 1, padding: 12 }}>Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
 
 function parseGoogleMapsUrl(url: string): { lat: number; lng: number } | null {
     // Format: https://maps.google.com/?q=40.7128,-74.0060

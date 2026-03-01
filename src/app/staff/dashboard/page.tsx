@@ -19,7 +19,8 @@ interface Shift {
     shift_date: string;
     start_time: string;
     end_time: string;
-    role: string;
+    name: string;
+    color: string;
 }
 
 interface Task {
@@ -156,14 +157,20 @@ export default function StaffDashboard() {
         }
         setOpenLog(currentOpenLog);
 
-        // Today's shift
-        const { data: shifts } = await supabase
-            .from('shifts')
-            .select('*')
+        // Today's shift (from shift_assignments + shift_definitions)
+        const { data: shiftAssignments } = await supabase
+            .from('shift_assignments')
+            .select('id, shift_date, shift_definition:shift_definitions(id, name, start_time, end_time, color)')
             .eq('staff_id', session.staff.id)
             .eq('shift_date', today)
             .limit(1);
-        setTodayShift(shifts && shifts.length > 0 ? shifts[0] : null);
+        if (shiftAssignments && shiftAssignments.length > 0) {
+            const sa = shiftAssignments[0] as any;
+            const sd = sa.shift_definition;
+            setTodayShift(sd ? { id: sa.id, shift_date: sa.shift_date, start_time: sd.start_time, end_time: sd.end_time, name: sd.name, color: sd.color } : null);
+        } else {
+            setTodayShift(null);
+        }
 
         // Today's tasks
         const { data: tasks } = await supabase
@@ -178,14 +185,18 @@ export default function StaffDashboard() {
 
         // Alerts
         const newAlerts: string[] = [];
-        if (shifts && shifts.length > 0) {
-            const shiftStart = shifts[0].start_time;
-            const now = new Date();
-            const [h, m] = shiftStart.split(':').map(Number);
-            const shiftTime = new Date(now);
-            shiftTime.setHours(h, m, 0, 0);
-            if (now > shiftTime && !(logs && logs.length > 0)) {
-                newAlerts.push(t(lang, 'alertLate'));
+        if (shiftAssignments && shiftAssignments.length > 0) {
+            const sa = shiftAssignments[0] as any;
+            const sd = sa.shift_definition;
+            if (sd) {
+                const shiftStart = sd.start_time;
+                const now = new Date();
+                const [h, m] = shiftStart.split(':').map(Number);
+                const shiftTime = new Date(now);
+                shiftTime.setHours(h, m, 0, 0);
+                if (now > shiftTime && !(logs && logs.length > 0)) {
+                    newAlerts.push(t(lang, 'alertLate'));
+                }
             }
         }
 
@@ -581,12 +592,17 @@ export default function StaffDashboard() {
                                 <span style={styles.shiftValue}>{todayShift.end_time.slice(0, 5)}</span>
                             </div>
                             <div style={styles.shiftItem}>
-                                <span style={styles.shiftLabel}>{t(lang, 'shiftRole')}</span>
-                                <span style={styles.shiftValue}>{todayShift.role || session?.staff.role || 'staff'}</span>
+                                <span style={styles.shiftLabel}>Shift</span>
+                                <span style={{ ...styles.shiftValue, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: todayShift.color, display: 'inline-block' }} />
+                                    {todayShift.name}
+                                </span>
                             </div>
                             <div style={styles.shiftItem}>
                                 <span style={styles.shiftLabel}>{t(lang, 'histStatus')}</span>
-                                <span style={{ ...styles.shiftValue, color: '#22c55e' }}>{t(lang, 'shiftOnTime')}</span>
+                                <span style={{ ...styles.shiftValue, color: isCheckedIn ? '#22c55e' : '#888' }}>
+                                    {isCheckedIn ? t(lang, 'shiftOnTime') : t(lang, 'attCheckedOut')}
+                                </span>
                             </div>
                         </div>
                     ) : (
