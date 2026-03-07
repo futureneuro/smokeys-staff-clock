@@ -106,7 +106,7 @@ export function getAuthHeaders(): Record<string, string> {
  * Clock action (check-in/out) using JWT auth.
  */
 export async function clockAction(
-  action: 'check_in' | 'check_out',
+  action: 'check_in' | 'check_out' | 'break_start' | 'break_end',
   gpsLat: number,
   gpsLng: number,
 ): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }> {

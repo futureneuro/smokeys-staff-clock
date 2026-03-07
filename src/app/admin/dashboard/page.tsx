@@ -32,7 +32,7 @@ interface TimeLog {
     staff?: Staff;
 }
 
-type Tab = 'staff' | 'logs' | 'reports' | 'tasks' | 'shifts' | 'qrcode' | 'settings';
+type Tab = 'staff' | 'logs' | 'reports' | 'tasks' | 'shifts' | 'monitor' | 'qrcode' | 'settings';
 
 export default function AdminDashboard() {
     const router = useRouter();
@@ -227,7 +227,7 @@ export default function AdminDashboard() {
 
             {/* Tabs */}
             <nav style={styles.tabs}>
-                {(['staff', 'logs', 'reports', 'tasks', 'shifts', 'qrcode', 'settings'] as Tab[]).map(tab => (
+                {(['staff', 'logs', 'reports', 'tasks', 'shifts', 'monitor', 'qrcode', 'settings'] as Tab[]).map(tab => (
                     <button
                         key={tab}
                         onClick={() => setActiveTab(tab)}
@@ -236,7 +236,7 @@ export default function AdminDashboard() {
                             ...(activeTab === tab ? styles.tabActive : {}),
                         }}
                     >
-                        {tab === 'staff' ? '👥 Staff' : tab === 'logs' ? '📋 Time Logs' : tab === 'reports' ? '📊 Reports' : tab === 'tasks' ? '✅ Tasks' : tab === 'shifts' ? '📅 Shifts' : tab === 'qrcode' ? '📱 QR Code' : '⚙️ Settings'}
+                        {tab === 'staff' ? '👥 Staff' : tab === 'logs' ? '📋 Time Logs' : tab === 'reports' ? '📊 Reports' : tab === 'tasks' ? '✅ Tasks' : tab === 'shifts' ? '📅 Shifts' : tab === 'monitor' ? '📡 Monitor' : tab === 'qrcode' ? '📱 QR Code' : '⚙️ Settings'}
                     </button>
                 ))}
             </nav>
@@ -491,6 +491,11 @@ export default function AdminDashboard() {
                 {/* ── SHIFTS TAB ── */}
                 {activeTab === 'shifts' && (
                     <ShiftsPanel staffList={staffList} />
+                )}
+
+                {/* ── MONITOR TAB ── */}
+                {activeTab === 'monitor' && (
+                    <MonitorPanel staffList={staffList} adminId={admin?.id || ''} />
                 )}
 
                 {/* ── QR CODE TAB ── */}
@@ -2300,6 +2305,302 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
 }
 
 
+// ═══════════════════════════════════════════════════
+//  MONITOR PANEL
+// ═══════════════════════════════════════════════════
+
+interface MonitorAssignment {
+    id: string;
+    shift_date: string;
+    status: string;
+    derived_status: string;
+    staff: { id: string; name: string; staff_code: string };
+    shift_definition: { id: string; name: string; start_time: string; end_time: string; color: string };
+    time_log: { id: string; check_in: string; check_out: string | null; late_minutes: number; check_in_flag: string; net_work_minutes: number | null } | null;
+    active_break: { id: string; break_start: string } | null;
+}
+
+interface ComplianceFlag {
+    id: string;
+    staff_id: string;
+    flag_type: string;
+    severity: string;
+    details: Record<string, unknown>;
+    created_at: string;
+    resolved_at: string | null;
+    staff?: { name: string };
+}
+
+function MonitorPanel({ staffList, adminId }: { staffList: Staff[]; adminId: string }) {
+    const [assignments, setAssignments] = useState<MonitorAssignment[]>([]);
+    const [flags, setFlags] = useState<ComplianceFlag[]>([]);
+    const [summary, setSummary] = useState<Record<string, number>>({});
+    const [loading, setLoading] = useState(true);
+    const [now, setNow] = useState(new Date());
+    const [overrideModal, setOverrideModal] = useState<{ type: string; staffId: string; staffName: string; timeLogId?: string; breakId?: string } | null>(null);
+    const [overrideReason, setOverrideReason] = useState('');
+    const [overrideSaving, setOverrideSaving] = useState(false);
+    const edgeFnBase = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace('supabase.co', 'supabase.co/functions/v1') || '';
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    const fetchMonitor = useCallback(async () => {
+        try {
+            const res = await fetch(`${edgeFnBase}/monitor-status?date=${todayStr}`);
+            if (res.ok) {
+                const data = await res.json();
+                setAssignments(data.assignments || []);
+                setFlags(data.flags || []);
+                setSummary(data.summary || {});
+            }
+        } finally {
+            setLoading(false);
+        }
+    }, [edgeFnBase, todayStr]);
+
+    useEffect(() => {
+        fetchMonitor();
+        const interval = setInterval(() => { fetchMonitor(); setNow(new Date()); }, 30000);
+        const tick = setInterval(() => setNow(new Date()), 1000);
+        return () => { clearInterval(interval); clearInterval(tick); };
+    }, [fetchMonitor]);
+
+    function breakDuration(startIso: string) {
+        const secs = Math.floor((now.getTime() - new Date(startIso).getTime()) / 1000);
+        const m = Math.floor(secs / 60), s = secs % 60;
+        return `${m}m ${s.toString().padStart(2, '0')}s`;
+    }
+
+    function statusColor(status: string) {
+        switch (status) {
+            case 'active': return '#22c55e';
+            case 'on_break': return '#f59e0b';
+            case 'missed': return '#ef4444';
+            case 'completed': return '#3b82f6';
+            case 'late': return '#f97316';
+            default: return '#666';
+        }
+    }
+    function statusLabel(status: string, lateMin = 0) {
+        switch (status) {
+            case 'active': return lateMin > 0 ? `⚠️ Late (${lateMin}m)` : '✅ Checked In';
+            case 'on_break': return '☕ On Break';
+            case 'missed': return '❌ Missed';
+            case 'completed': return '🏁 Completed';
+            case 'scheduled': return '🕐 Scheduled';
+            case 'cancelled': return '🚫 Cancelled';
+            default: return status;
+        }
+    }
+
+    async function doOverride() {
+        if (!overrideReason.trim() || !overrideModal) return;
+        setOverrideSaving(true);
+        const { type, staffId, timeLogId } = overrideModal;
+
+        if (type === 'force_checkout' && timeLogId) {
+            const serverNow = new Date().toISOString();
+            // Get the open log to compute hours
+            const { data: log } = await supabase.from('time_logs').select('check_in').eq('id', timeLogId).single();
+            const totalHours = log ? Number(((Date.now() - new Date(log.check_in).getTime()) / 3600000).toFixed(2)) : 0;
+            await supabase.from('time_logs').update({
+                check_out: serverNow, original_check_out: serverNow,
+                total_hours: totalHours, edited_by: adminId, edit_reason: overrideReason,
+                check_out_flag: 'on_time',
+            }).eq('id', timeLogId);
+            // Update shift assignment
+            await supabase.from('shift_assignments').update({ status: 'completed' }).eq('time_log_id' as never, timeLogId);
+            // Audit log
+            await supabase.from('audit_logs').insert({
+                admin_id: adminId, action: 'force_checkout', target_staff_id: staffId,
+                details: { time_log_id: timeLogId, reason: overrideReason },
+            });
+        }
+
+        if (type === 'close_break' && overrideModal.breakId) {
+            const serverNow = new Date().toISOString();
+            const { data: brk } = await supabase.from('breaks').select('break_start').eq('id', overrideModal.breakId).single();
+            const durationMinutes = brk ? Math.round((Date.now() - new Date(brk.break_start).getTime()) / 60000) : 0;
+            await supabase.from('breaks').update({ break_end: serverNow, duration_minutes: durationMinutes }).eq('id', overrideModal.breakId);
+            await supabase.from('audit_logs').insert({
+                admin_id: adminId, action: 'close_break', target_staff_id: staffId,
+                details: { break_id: overrideModal.breakId, reason: overrideReason },
+            });
+        }
+
+        setOverrideModal(null);
+        setOverrideReason('');
+        setOverrideSaving(false);
+        fetchMonitor();
+    }
+
+    async function resolveFlag(flagId: string) {
+        await supabase.from('compliance_flags').update({ resolved_at: new Date().toISOString(), resolved_by: adminId }).eq('id', flagId);
+        fetchMonitor();
+    }
+
+    const unresolvedFlags = flags.filter(f => !f.resolved_at);
+    const severityColor = (s: string) => s === 'critical' ? '#ef4444' : s === 'warning' ? '#f59e0b' : '#3b82f6';
+    const flagLabel = (t: string) => ({ late_checkin: 'Late Check-In', early_checkout: 'Early Checkout', break_overage: 'Break Overage', missed_checkout: 'Missed Checkout' }[t] || t);
+
+    return (
+        <div className="animate-fadeIn">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+                <h2 style={styles.sectionTitle}>📡 Real-Time Monitor</h2>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ color: '#555', fontSize: 12 }}>Auto-refresh every 30s</span>
+                    <button onClick={fetchMonitor} style={{ background: '#222', border: '1px solid #333', borderRadius: 8, padding: '6px 14px', color: '#ccc', cursor: 'pointer', fontSize: 12 }}>↻ Refresh</button>
+                </div>
+            </div>
+
+            {/* Summary Strip */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10, marginBottom: 24 }}>
+                {[
+                    { label: 'Scheduled', val: summary.scheduled || 0, color: '#666' },
+                    { label: 'Checked In', val: summary.active || 0, color: '#22c55e' },
+                    { label: 'On Break', val: summary.on_break || 0, color: '#f59e0b' },
+                    { label: 'Late', val: summary.late || 0, color: '#f97316' },
+                    { label: 'Missed', val: summary.missed || 0, color: '#ef4444' },
+                    { label: 'Completed', val: summary.completed || 0, color: '#3b82f6' },
+                ].map(({ label, val, color }) => (
+                    <div key={label} style={{ background: '#1a1a1a', border: `1px solid ${color}33`, borderRadius: 12, padding: '14px 12px', textAlign: 'center' }}>
+                        <div style={{ fontSize: 26, fontWeight: 800, color }}>{val}</div>
+                        <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>{label}</div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Staff Cards */}
+            {loading ? (
+                <p style={{ color: '#555', textAlign: 'center', padding: 40 }}>Loading...</p>
+            ) : assignments.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '60px 20px', color: '#444' }}>
+                    <p style={{ fontSize: 32, marginBottom: 8 }}>📅</p>
+                    <p style={{ fontSize: 14 }}>No shifts scheduled for today.</p>
+                </div>
+            ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14, marginBottom: 28 }}>
+                    {assignments.map(sa => {
+                        const color = statusColor(sa.derived_status);
+                        const lateMin = sa.time_log?.late_minutes || 0;
+                        return (
+                            <div key={sa.id} style={{ background: '#1a1a1a', border: `1px solid ${color}40`, borderRadius: 16, padding: 18, position: 'relative' }}>
+                                {/* Color bar */}
+                                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: color, borderRadius: '16px 16px 0 0' }} />
+
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10, marginTop: 4 }}>
+                                    <div>
+                                        <div style={{ color: '#fff', fontSize: 15, fontWeight: 700 }}>{sa.staff?.name || 'Unknown'}</div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: sa.shift_definition?.color || '#f0b427' }} />
+                                            <span style={{ color: '#888', fontSize: 12 }}>{sa.shift_definition?.name} · {sa.shift_definition?.start_time?.slice(0, 5)}–{sa.shift_definition?.end_time?.slice(0, 5)}</span>
+                                        </div>
+                                    </div>
+                                    <span style={{ fontSize: 12, fontWeight: 600, color, background: `${color}18`, borderRadius: 20, padding: '4px 10px', whiteSpace: 'nowrap' }}>
+                                        {statusLabel(sa.derived_status, lateMin)}
+                                    </span>
+                                </div>
+
+                                {sa.time_log?.check_in && (
+                                    <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#666', marginBottom: 8 }}>
+                                        <span>🕐 In: {new Date(sa.time_log.check_in).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}</span>
+                                        {sa.time_log.check_out && <span>Out: {new Date(sa.time_log.check_out).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}</span>}
+                                    </div>
+                                )}
+
+                                {/* Live break timer */}
+                                {sa.active_break && (
+                                    <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 10, padding: '8px 12px', marginBottom: 8 }}>
+                                        <span style={{ color: '#f59e0b', fontSize: 12, fontWeight: 600 }}>☕ Break: {breakDuration(sa.active_break.break_start)}</span>
+                                    </div>
+                                )}
+
+                                {/* Override actions */}
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                                    {(sa.derived_status === 'active' || sa.derived_status === 'on_break') && sa.time_log && (
+                                        <button
+                                            onClick={() => setOverrideModal({ type: 'force_checkout', staffId: sa.staff.id, staffName: sa.staff.name, timeLogId: sa.time_log!.id })}
+                                            style={{ fontSize: 11, padding: '5px 10px', background: '#ef444422', border: '1px solid #ef4444', borderRadius: 8, color: '#ef4444', cursor: 'pointer' }}
+                                        >Force Checkout</button>
+                                    )}
+                                    {sa.derived_status === 'on_break' && sa.active_break && (
+                                        <button
+                                            onClick={() => setOverrideModal({ type: 'close_break', staffId: sa.staff.id, staffName: sa.staff.name, breakId: sa.active_break!.id })}
+                                            style={{ fontSize: 11, padding: '5px 10px', background: '#f59e0b22', border: '1px solid #f59e0b', borderRadius: 8, color: '#f59e0b', cursor: 'pointer' }}
+                                        >Close Break</button>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
+            {/* Compliance Flags */}
+            <div style={{ background: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: 16, padding: 20 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                    <h3 style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: 0 }}>
+                        🚨 Compliance Alerts
+                        {unresolvedFlags.length > 0 && (
+                            <span style={{ marginLeft: 8, background: '#ef4444', color: '#fff', fontSize: 11, borderRadius: 20, padding: '2px 8px' }}>{unresolvedFlags.length}</span>
+                        )}
+                    </h3>
+                </div>
+                {unresolvedFlags.length === 0 ? (
+                    <p style={{ color: '#444', fontSize: 13, textAlign: 'center', padding: '20px 0' }}>✅ No open compliance alerts today.</p>
+                ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {unresolvedFlags.map(f => (
+                            <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#111', border: `1px solid ${severityColor(f.severity)}33`, borderRadius: 10, padding: '10px 14px' }}>
+                                <div style={{ flex: 1 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                                        <span style={{ fontSize: 10, fontWeight: 700, color: severityColor(f.severity), textTransform: 'uppercase', background: `${severityColor(f.severity)}18`, borderRadius: 20, padding: '2px 8px' }}>{f.severity}</span>
+                                        <span style={{ color: '#ccc', fontSize: 13, fontWeight: 600 }}>{flagLabel(f.flag_type)}</span>
+                                        <span style={{ color: '#555', fontSize: 11 }}>· {f.staff?.name}</span>
+                                    </div>
+                                    {f.details && Object.keys(f.details).length > 0 && (
+                                        <div style={{ color: '#666', fontSize: 11 }}>{JSON.stringify(f.details)}</div>
+                                    )}
+                                    <div style={{ color: '#444', fontSize: 10, marginTop: 2 }}>{new Date(f.created_at).toLocaleTimeString()}</div>
+                                </div>
+                                <button onClick={() => resolveFlag(f.id)} style={{ fontSize: 11, padding: '5px 12px', background: '#22c55e22', border: '1px solid #22c55e', borderRadius: 8, color: '#22c55e', cursor: 'pointer', marginLeft: 10, flexShrink: 0 }}>Resolve</button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* Override Modal */}
+            {overrideModal && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, padding: 20 }}>
+                    <div className="card" style={{ maxWidth: 400, width: '100%', padding: 24 }}>
+                        <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 6 }}>
+                            {overrideModal.type === 'force_checkout' ? '🔴 Force Check-Out' : '☕ Close Break'}
+                        </h3>
+                        <p style={{ color: '#888', fontSize: 13, marginBottom: 16 }}>Staff: <strong style={{ color: '#ccc' }}>{overrideModal.staffName}</strong></p>
+                        <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Reason (required)</label>
+                        <textarea
+                            className="input-field"
+                            rows={3}
+                            value={overrideReason}
+                            onChange={e => setOverrideReason(e.target.value)}
+                            placeholder="Explain the reason for this override..."
+                            style={{ resize: 'vertical', marginBottom: 16 }}
+                        />
+                        <div style={{ display: 'flex', gap: 8 }}>
+                            <button onClick={doOverride} disabled={!overrideReason.trim() || overrideSaving} className="btn-primary" style={{ flex: 1, padding: 12 }}>
+                                {overrideSaving ? 'Saving...' : 'Confirm Override'}
+                            </button>
+                            <button onClick={() => { setOverrideModal(null); setOverrideReason(''); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
+                        </div>
+                        <p style={{ color: '#555', fontSize: 11, marginTop: 10, textAlign: 'center' }}>This action is logged in the audit trail.</p>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+
 interface ShiftDefinition {
     id: string;
     name: string;
@@ -2307,6 +2608,13 @@ interface ShiftDefinition {
     end_time: string;
     color: string;
     created_at: string;
+    shift_type: string;
+    early_checkin_minutes: number;
+    late_grace_minutes: number;
+    early_checkout_minutes: number;
+    late_tolerance_minutes: number;
+    block_outside_window: boolean;
+    published: boolean;
 }
 
 interface ShiftAssignment {
@@ -2323,7 +2631,16 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
     const [showForm, setShowForm] = useState(false);
     const [editingShift, setEditingShift] = useState<ShiftDefinition | null>(null);
-    const [form, setForm] = useState({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427' });
+    const [form, setForm] = useState({
+        name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427',
+        shift_type: 'normal',
+        early_checkin_minutes: 15,
+        late_grace_minutes: 10,
+        early_checkout_minutes: 0,
+        late_tolerance_minutes: 30,
+        block_outside_window: false,
+        published: false,
+    });
     const [saving, setSaving] = useState(false);
     const [weekOffset, setWeekOffset] = useState(0);
     const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -2367,19 +2684,25 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     async function saveShiftDef(e: React.FormEvent) {
         e.preventDefault();
         setSaving(true);
+        const payload = {
+            name: form.name, start_time: form.start_time, end_time: form.end_time, color: form.color,
+            shift_type: form.shift_type,
+            early_checkin_minutes: form.early_checkin_minutes,
+            late_grace_minutes: form.late_grace_minutes,
+            early_checkout_minutes: form.early_checkout_minutes,
+            late_tolerance_minutes: form.late_tolerance_minutes,
+            block_outside_window: form.block_outside_window,
+            published: form.published,
+        };
         if (editingShift) {
-            await supabase.from('shift_definitions').update({
-                name: form.name, start_time: form.start_time, end_time: form.end_time, color: form.color,
-            }).eq('id', editingShift.id);
+            await supabase.from('shift_definitions').update(payload).eq('id', editingShift.id);
         } else {
-            await supabase.from('shift_definitions').insert({
-                name: form.name, start_time: form.start_time, end_time: form.end_time, color: form.color,
-            });
+            await supabase.from('shift_definitions').insert(payload);
         }
         setSaving(false);
         setShowForm(false);
         setEditingShift(null);
-        setForm({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427' });
+        setForm({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal', early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30, block_outside_window: false, published: false });
         fetchShiftDefs();
     }
 
@@ -2450,7 +2773,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
                 <h2 style={styles.sectionTitle}>Shift Management</h2>
-                <button onClick={() => { setShowForm(true); setEditingShift(null); setForm({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427' }); }} className="btn-primary" style={{ width: 'auto', padding: '10px 20px', fontSize: 13 }}>
+                <button onClick={() => { setShowForm(true); setEditingShift(null); setForm({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal', early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30, block_outside_window: false, published: false }); }} className="btn-primary" style={{ width: 'auto', padding: '10px 20px', fontSize: 13 }}>
                     + New Shift
                 </button>
             </div>
@@ -2473,7 +2796,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             <span style={{ width: 12, height: 12, borderRadius: '50%', background: sd.color, flexShrink: 0 }} />
                             <span style={{ color: '#fff', fontSize: 14, fontWeight: 700, flex: 1 }}>{sd.name}</span>
                             <div style={{ display: 'flex', gap: 4 }}>
-                                <button onClick={e => { e.stopPropagation(); setEditingShift(sd); setForm({ name: sd.name, start_time: sd.start_time.slice(0, 5), end_time: sd.end_time.slice(0, 5), color: sd.color }); setShowForm(true); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>✏️</button>
+                                <button onClick={e => { e.stopPropagation(); setEditingShift(sd); setForm({ name: sd.name, start_time: sd.start_time.slice(0, 5), end_time: sd.end_time.slice(0, 5), color: sd.color, shift_type: sd.shift_type || 'normal', early_checkin_minutes: sd.early_checkin_minutes ?? 15, late_grace_minutes: sd.late_grace_minutes ?? 10, early_checkout_minutes: sd.early_checkout_minutes ?? 0, late_tolerance_minutes: sd.late_tolerance_minutes ?? 30, block_outside_window: sd.block_outside_window ?? false, published: sd.published ?? false }); setShowForm(true); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>✏️</button>
                                 <button onClick={e => { e.stopPropagation(); setDeleteId(sd.id); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>🗑️</button>
                             </div>
                         </div>
@@ -2606,16 +2929,34 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                 </div>
             </div>
 
-            {/* Create/Edit Shift Modal */}
+            {/* ─── Break Policies ─── */}
+            <BreakPoliciesPanel shiftDefs={shiftDefs} />
+
+
             {showForm && (
-                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 }}>
-                    <div className="card" style={{ maxWidth: 400, width: '100%', padding: 24 }}>
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20, overflowY: 'auto' }}>
+                    <div className="card" style={{ maxWidth: 520, width: '100%', padding: 24, margin: 'auto' }}>
                         <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
                             {editingShift ? '✏️ Edit Shift' : '📅 New Shift Definition'}
                         </h3>
                         <form onSubmit={saveShiftDef}>
-                            <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Name</label>
-                            <input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. Morning, Afternoon, Night" required style={{ marginBottom: 12 }} />
+                            {/* Name + Type */}
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, marginBottom: 12 }}>
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Name</label>
+                                    <input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. Morning" required />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Type</label>
+                                    <select className="input-field" value={form.shift_type} onChange={e => setForm({ ...form, shift_type: e.target.value })} style={{ colorScheme: 'dark' }}>
+                                        <option value="normal">Normal</option>
+                                        <option value="opening">Opening</option>
+                                        <option value="closing">Closing</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Times */}
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
                                 <div>
                                     <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Start Time</label>
@@ -2626,11 +2967,51 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                     <input className="input-field" type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} required style={{ colorScheme: 'dark' }} />
                                 </div>
                             </div>
-                            <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Color</label>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                                <input type="color" value={form.color} onChange={e => setForm({ ...form, color: e.target.value })} style={{ width: 40, height: 40, border: 'none', borderRadius: 8, cursor: 'pointer', background: 'none' }} />
-                                <span style={{ fontSize: 12, color: '#888' }}>{form.color}</span>
+
+                            {/* Time Window Policy */}
+                            <div style={{ background: '#111', borderRadius: 12, padding: '14px 16px', marginBottom: 12, border: '1px solid #2a2a2a' }}>
+                                <p style={{ color: '#888', fontSize: 12, fontWeight: 600, textTransform: 'uppercase' as const, letterSpacing: '0.5px', marginBottom: 12, margin: '0 0 12px' }}>⏱ Time Window Policy</p>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                    <div>
+                                        <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Early Check-In (min)</label>
+                                        <input className="input-field" type="number" min={0} max={120} value={form.early_checkin_minutes} onChange={e => setForm({ ...form, early_checkin_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Late Grace Period (min)</label>
+                                        <input className="input-field" type="number" min={0} max={120} value={form.late_grace_minutes} onChange={e => setForm({ ...form, late_grace_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Early Checkout (min before)</label>
+                                        <input className="input-field" type="number" min={0} max={120} value={form.early_checkout_minutes} onChange={e => setForm({ ...form, early_checkout_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Late Checkout Tolerance (min)</label>
+                                        <input className="input-field" type="number" min={0} max={240} value={form.late_tolerance_minutes} onChange={e => setForm({ ...form, late_tolerance_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                    </div>
+                                </div>
+                                <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', flex: 1 }}>
+                                        <input type="checkbox" checked={form.block_outside_window} onChange={e => setForm({ ...form, block_outside_window: e.target.checked })} style={{ width: 16, height: 16, accentColor: '#ef4444' }} />
+                                        <span style={{ fontSize: 12, color: '#ccc' }}>Block check-in/out outside window</span>
+                                    </label>
+                                </div>
                             </div>
+
+                            {/* Color + Published */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Color</label>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <input type="color" value={form.color} onChange={e => setForm({ ...form, color: e.target.value })} style={{ width: 40, height: 36, border: 'none', borderRadius: 8, cursor: 'pointer', background: 'none' }} />
+                                        <span style={{ fontSize: 12, color: '#888' }}>{form.color}</span>
+                                    </div>
+                                </div>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginTop: 22 }}>
+                                    <input type="checkbox" checked={form.published} onChange={e => setForm({ ...form, published: e.target.checked })} style={{ width: 16, height: 16, accentColor: '#22c55e' }} />
+                                    <span style={{ fontSize: 12, color: '#ccc' }}>Published (staff can see)</span>
+                                </label>
+                            </div>
+
                             <div style={{ display: 'flex', gap: 8 }}>
                                 <button type="submit" className="btn-primary" disabled={saving} style={{ flex: 1, padding: 12 }}>
                                     {saving ? 'Saving...' : editingShift ? '💾 Update Shift' : '📅 Create Shift'}
@@ -2693,6 +3074,157 @@ function parseGoogleMapsUrl(url: string): { lat: number; lng: number } | null {
     }
 
     return null;
+}
+
+
+// ═══════════════════════════════════════════════════
+//  BREAK POLICIES PANEL
+// ═══════════════════════════════════════════════════
+
+interface BreakPolicy {
+    id: string;
+    name: string;
+    shift_definition_id: string | null;
+    max_breaks: number;
+    max_break_duration_minutes: number;
+    max_total_break_minutes: number;
+    min_work_before_break_minutes: number;
+    requires_geofence: boolean;
+    created_at: string;
+}
+
+function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: string }[] }) {
+    const [policies, setPolicies] = useState<BreakPolicy[]>([]);
+    const [showForm, setShowForm] = useState(false);
+    const [editingPolicy, setEditingPolicy] = useState<BreakPolicy | null>(null);
+    const [form, setForm] = useState({
+        name: '', shift_definition_id: '', max_breaks: 2,
+        max_break_duration_minutes: 30, max_total_break_minutes: 60,
+        min_work_before_break_minutes: 120, requires_geofence: false,
+    });
+    const [saving, setSaving] = useState(false);
+
+    const fetchPolicies = useCallback(async () => {
+        const { data } = await supabase.from('break_policies').select('*').order('created_at');
+        if (data) setPolicies(data);
+    }, []);
+
+    useEffect(() => { fetchPolicies(); }, [fetchPolicies]);
+
+    async function savePolicy(e: React.FormEvent) {
+        e.preventDefault();
+        setSaving(true);
+        const payload = {
+            name: form.name,
+            shift_definition_id: form.shift_definition_id || null,
+            max_breaks: form.max_breaks,
+            max_break_duration_minutes: form.max_break_duration_minutes,
+            max_total_break_minutes: form.max_total_break_minutes,
+            min_work_before_break_minutes: form.min_work_before_break_minutes,
+            requires_geofence: form.requires_geofence,
+        };
+        if (editingPolicy) {
+            await supabase.from('break_policies').update(payload).eq('id', editingPolicy.id);
+        } else {
+            await supabase.from('break_policies').insert(payload);
+        }
+        setSaving(false);
+        setShowForm(false);
+        setEditingPolicy(null);
+        setForm({ name: '', shift_definition_id: '', max_breaks: 2, max_break_duration_minutes: 30, max_total_break_minutes: 60, min_work_before_break_minutes: 120, requires_geofence: false });
+        fetchPolicies();
+    }
+
+    function editPolicy(p: BreakPolicy) {
+        setEditingPolicy(p);
+        setForm({ name: p.name, shift_definition_id: p.shift_definition_id || '', max_breaks: p.max_breaks, max_break_duration_minutes: p.max_break_duration_minutes, max_total_break_minutes: p.max_total_break_minutes, min_work_before_break_minutes: p.min_work_before_break_minutes, requires_geofence: p.requires_geofence });
+        setShowForm(true);
+    }
+
+    async function deletePolicy(id: string) {
+        await supabase.from('break_policies').delete().eq('id', id);
+        fetchPolicies();
+    }
+
+    const shiftName = (id: string | null) => shiftDefs.find(s => s.id === id)?.name || 'All shifts (global)';
+
+    return (
+        <div style={{ background: '#1a1a1a', borderRadius: 16, border: '1px solid #2a2a2a', padding: 20, marginTop: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: 0 }}>☕ Break Policies</h3>
+                <button onClick={() => { setEditingPolicy(null); setForm({ name: '', shift_definition_id: '', max_breaks: 2, max_break_duration_minutes: 30, max_total_break_minutes: 60, min_work_before_break_minutes: 120, requires_geofence: false }); setShowForm(true); }} className="btn-primary" style={{ width: 'auto', padding: '8px 14px', fontSize: 12 }}>+ New Policy</button>
+            </div>
+
+            {policies.length === 0 ? (
+                <p style={{ color: '#444', fontSize: 13, textAlign: 'center', padding: '16px 0' }}>No break policies defined. Breaks are unrestricted by default.</p>
+            ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {policies.map(p => (
+                        <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#111', borderRadius: 10, padding: '10px 14px', border: '1px solid #222' }}>
+                            <div style={{ flex: 1 }}>
+                                <div style={{ color: '#ccc', fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                                <div style={{ color: '#666', fontSize: 11, marginTop: 2 }}>
+                                    {shiftName(p.shift_definition_id)} · {p.max_breaks} breaks · {p.max_break_duration_minutes}min each · {p.max_total_break_minutes}min total
+                                    {p.requires_geofence && ' · 📍 Geofenced'}
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                                <button onClick={() => editPolicy(p)} style={{ background: 'none', border: '1px solid #333', borderRadius: 8, color: '#888', cursor: 'pointer', fontSize: 12, padding: '5px 10px' }}>✏️ Edit</button>
+                                <button onClick={() => deletePolicy(p.id)} style={{ background: 'none', border: '1px solid #444', borderRadius: 8, color: '#ef4444', cursor: 'pointer', fontSize: 12, padding: '5px 10px' }}>🗑</button>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {showForm && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, padding: 20 }}>
+                    <div className="card" style={{ maxWidth: 460, width: '100%', padding: 24 }}>
+                        <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 16 }}>{editingPolicy ? 'Edit Break Policy' : '+ New Break Policy'}</h3>
+                        <form onSubmit={savePolicy}>
+                            <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Policy Name</label>
+                            <input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. Standard Break Policy" required style={{ marginBottom: 10 }} />
+
+                            <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Applies to Shift (leave blank for all)</label>
+                            <select className="input-field" value={form.shift_definition_id} onChange={e => setForm({ ...form, shift_definition_id: e.target.value })} style={{ marginBottom: 10, colorScheme: 'dark' }}>
+                                <option value="">All shifts (global)</option>
+                                {shiftDefs.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                            </select>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                                <div>
+                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Breaks</label>
+                                    <input className="input-field" type="number" min={1} max={10} value={form.max_breaks} onChange={e => setForm({ ...form, max_breaks: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Duration (min)</label>
+                                    <input className="input-field" type="number" min={5} max={120} value={form.max_break_duration_minutes} onChange={e => setForm({ ...form, max_break_duration_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Total Break (min)</label>
+                                    <input className="input-field" type="number" min={5} max={240} value={form.max_total_break_minutes} onChange={e => setForm({ ...form, max_total_break_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Min Work Before Break (min)</label>
+                                    <input className="input-field" type="number" min={0} max={480} value={form.min_work_before_break_minutes} onChange={e => setForm({ ...form, min_work_before_break_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                </div>
+                            </div>
+
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16 }}>
+                                <input type="checkbox" checked={form.requires_geofence} onChange={e => setForm({ ...form, requires_geofence: e.target.checked })} style={{ accentColor: '#f0b427' }} />
+                                <span style={{ fontSize: 12, color: '#ccc' }}>Require on-site GPS to start break</span>
+                            </label>
+
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <button type="submit" className="btn-primary" disabled={saving} style={{ flex: 1, padding: 12 }}>{saving ? 'Saving...' : editingPolicy ? '💾 Update' : '+ Create'}</button>
+                                <button type="button" onClick={() => { setShowForm(false); setEditingPolicy(null); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
 }
 
 function SettingsPanel() {

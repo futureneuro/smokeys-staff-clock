@@ -21,6 +21,9 @@ interface Shift {
     end_time: string;
     name: string;
     color: string;
+    early_checkin_minutes: number;
+    late_grace_minutes: number;
+    block_outside_window: boolean;
 }
 
 interface Task {
@@ -98,6 +101,14 @@ export default function StaffDashboard() {
     const [correctionSaving, setCorrectionSaving] = useState(false);
     const autoClockOutProcessed = useRef<Set<string>>(new Set());
 
+    // Break management
+    const [activeBreak, setActiveBreak] = useState<{ id: string; break_start: string } | null>(null);
+    const [breakCount, setBreakCount] = useState(0);
+    const [breakTimer, setBreakTimer] = useState(0); // seconds
+    const [breakLoading, setBreakLoading] = useState(false);
+    const [breakError, setBreakError] = useState('');
+    const [breakSuccess, setBreakSuccess] = useState('');
+
     useEffect(() => {
         const saved = localStorage.getItem('smokeys_lang') as Lang | null;
         if (saved === 'en' || saved === 'es') setLang(saved);
@@ -160,14 +171,14 @@ export default function StaffDashboard() {
         // Today's shift (from shift_assignments + shift_definitions)
         const { data: shiftAssignments } = await supabase
             .from('shift_assignments')
-            .select('id, shift_date, shift_definition:shift_definitions(id, name, start_time, end_time, color)')
+            .select('id, shift_date, shift_definition:shift_definitions(id, name, start_time, end_time, color, early_checkin_minutes, late_grace_minutes, block_outside_window)')
             .eq('staff_id', session.staff.id)
             .eq('shift_date', today)
             .limit(1);
         if (shiftAssignments && shiftAssignments.length > 0) {
             const sa = shiftAssignments[0] as any;
             const sd = sa.shift_definition;
-            setTodayShift(sd ? { id: sa.id, shift_date: sa.shift_date, start_time: sd.start_time, end_time: sd.end_time, name: sd.name, color: sd.color } : null);
+            setTodayShift(sd ? { id: sa.id, shift_date: sa.shift_date, start_time: sd.start_time, end_time: sd.end_time, name: sd.name, color: sd.color, early_checkin_minutes: sd.early_checkin_minutes ?? 15, late_grace_minutes: sd.late_grace_minutes ?? 10, block_outside_window: sd.block_outside_window ?? false } : null);
         } else {
             setTodayShift(null);
         }
@@ -242,6 +253,38 @@ export default function StaffDashboard() {
         setHistoryLogs(data || []);
     }, [session]);
 
+    const fetchBreakData = useCallback(async (timeLogId: string) => {
+        // Active break
+        const { data: active } = await supabase
+            .from('breaks')
+            .select('id, break_start')
+            .eq('time_log_id', timeLogId)
+            .is('break_end', null)
+            .limit(1);
+        setActiveBreak(active && active.length > 0 ? active[0] : null);
+        // Break count (all breaks for this log, including completed)
+        const { count } = await supabase
+            .from('breaks')
+            .select('id', { count: 'exact', head: true })
+            .eq('time_log_id', timeLogId);
+        setBreakCount(count || 0);
+    }, []);
+
+    // When open log changes, fetch break state
+    useEffect(() => {
+        if (openLog) fetchBreakData(openLog.id);
+        else { setActiveBreak(null); setBreakCount(0); }
+    }, [openLog, fetchBreakData]);
+
+    // Live break timer
+    useEffect(() => {
+        if (!activeBreak) { setBreakTimer(0); return; }
+        const tick = setInterval(() => {
+            setBreakTimer(Math.floor((Date.now() - new Date(activeBreak.break_start).getTime()) / 1000));
+        }, 1000);
+        return () => clearInterval(tick);
+    }, [activeBreak]);
+
     const fetchAllTasks = useCallback(async () => {
         if (!session) return;
         const { data } = await supabase
@@ -312,6 +355,22 @@ export default function StaffDashboard() {
             setClockError(result.error || 'Failed');
         }
         setClockLoading(false);
+    }
+
+    async function handleBreak(action: 'break_start' | 'break_end') {
+        if (!position) return;
+        setBreakLoading(true);
+        setBreakError('');
+        setBreakSuccess('');
+        const result = await clockAction(action, position.lat, position.lng);
+        if (result.success) {
+            setBreakSuccess(result.data?.message as string || (action === 'break_start' ? 'Break started.' : 'Break ended.'));
+            if (openLog) fetchBreakData(openLog.id);
+            setTimeout(() => setBreakSuccess(''), 5000);
+        } else {
+            setBreakError(result.error || 'Failed');
+        }
+        setBreakLoading(false);
     }
 
     async function handleClockOutCorrection() {
@@ -604,11 +663,74 @@ export default function StaffDashboard() {
                                     {isCheckedIn ? t(lang, 'shiftOnTime') : t(lang, 'attCheckedOut')}
                                 </span>
                             </div>
+                            {/* Check-in window info */}
+                            {!isCheckedIn && (() => {
+                                const [h, m] = todayShift.start_time.split(':').map(Number);
+                                const earliest = new Date(); earliest.setHours(h, m - todayShift.early_checkin_minutes, 0, 0);
+                                const latest = new Date(); latest.setHours(h, m + todayShift.late_grace_minutes, 0, 0);
+                                const now = new Date();
+                                const tooEarly = now < earliest;
+                                const tooLate = now > latest;
+                                const fmt = (d: Date) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+                                return (
+                                    <div style={{ gridColumn: '1 / -1', background: tooLate ? 'rgba(239,68,68,0.08)' : tooEarly ? 'rgba(245,158,11,0.08)' : 'rgba(34,197,94,0.08)', border: `1px solid ${tooLate ? 'rgba(239,68,68,0.2)' : tooEarly ? 'rgba(245,158,11,0.2)' : 'rgba(34,197,94,0.2)'}`, borderRadius: 10, padding: '8px 12px', marginTop: 4 }}>
+                                        <div style={{ fontSize: 12, color: tooLate ? '#ef4444' : tooEarly ? '#f59e0b' : '#22c55e', fontWeight: 600 }}>
+                                            {tooEarly ? `⏳ Check-in opens at ${fmt(earliest)}` : tooLate ? (todayShift.block_outside_window ? '🚫 Check-in window closed' : `⚠️ Late — window closed at ${fmt(latest)}`) : `✅ Check-in window open until ${fmt(latest)}`}
+                                        </div>
+                                    </div>
+                                );
+                            })()}
                         </div>
                     ) : (
                         <p style={styles.emptyText}>{t(lang, 'shiftNoShift')}</p>
                     )}
                 </div>
+
+                {/* Break Card — only visible when checked in */}
+                {openLog && (
+                    <div style={{ ...styles.card, border: activeBreak ? '1px solid rgba(245,158,11,0.4)' : undefined }}>
+                        <div style={styles.cardHeader}>
+                            <span style={styles.cardIcon}>☕</span>
+                            <h3 style={styles.cardTitle}>Break</h3>
+                            {breakCount > 0 && (
+                                <span style={{ marginLeft: 'auto', fontSize: 11, color: '#888', background: '#222', borderRadius: 20, padding: '3px 10px' }}>
+                                    {breakCount} break{breakCount !== 1 ? 's' : ''} taken
+                                </span>
+                            )}
+                        </div>
+
+                        {activeBreak && (
+                            <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 12, padding: '12px 16px', marginBottom: 12, textAlign: 'center' }}>
+                                <div style={{ color: '#f59e0b', fontSize: 28, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                                    {`${Math.floor(breakTimer / 60)}:${(breakTimer % 60).toString().padStart(2, '0')}`}
+                                </div>
+                                <div style={{ color: '#888', fontSize: 12, marginTop: 2 }}>Break in progress</div>
+                            </div>
+                        )}
+
+                        {breakError && <p style={{ color: '#ef4444', fontSize: 13, marginBottom: 8, textAlign: 'center' }}>{breakError}</p>}
+                        {breakSuccess && <p style={{ color: '#22c55e', fontSize: 13, marginBottom: 8, textAlign: 'center' }}>{breakSuccess}</p>}
+
+                        {geoStatus === 'ok' ? (
+                            <button
+                                onClick={() => handleBreak(activeBreak ? 'break_end' : 'break_start')}
+                                disabled={breakLoading}
+                                style={{
+                                    width: '100%', padding: '14px', borderRadius: 14,
+                                    background: activeBreak ? 'rgba(245,158,11,0.15)' : 'rgba(34,197,94,0.1)',
+                                    border: `2px solid ${activeBreak ? '#f59e0b' : '#22c55e'}`,
+                                    color: activeBreak ? '#f59e0b' : '#22c55e',
+                                    fontSize: 15, fontWeight: 700, cursor: breakLoading ? 'not-allowed' : 'pointer',
+                                    transition: 'all 0.2s', opacity: breakLoading ? 0.6 : 1,
+                                }}
+                            >
+                                {breakLoading ? '...' : activeBreak ? '⏹ End Break' : '▶ Start Break'}
+                            </button>
+                        ) : (
+                            <p style={{ color: '#555', fontSize: 12, textAlign: 'center' }}>Location required to start/end break.</p>
+                        )}
+                    </div>
+                )}
 
                 {/* Tasks Card */}
                 <div style={styles.card}>
