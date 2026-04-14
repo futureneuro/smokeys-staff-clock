@@ -12,6 +12,8 @@ interface TimeLog {
     check_in: string;
     check_out: string | null;
     total_hours: number | null;
+    gps_lat?: number | null;
+    gps_lng?: number | null;
 }
 
 interface Shift {
@@ -116,6 +118,14 @@ export default function StaffDashboard() {
     const [lateReasonSaved, setLateReasonSaved] = useState(false);
     const [lateReasonSubmitting, setLateReasonSubmitting] = useState(false);
     const [lateReasonError, setLateReasonError] = useState('');
+
+    const getActionPosition = useCallback((action: 'check_in' | 'check_out' | 'break_start' | 'break_end') => {
+        if (position) return position;
+        if ((action === 'check_out' || action === 'break_end') && openLog?.gps_lat != null && openLog?.gps_lng != null) {
+            return { lat: openLog.gps_lat, lng: openLog.gps_lng };
+        }
+        return null;
+    }, [position, openLog]);
 
     useEffect(() => {
         const saved = localStorage.getItem('smokeys_lang') as Lang | null;
@@ -344,7 +354,7 @@ export default function StaffDashboard() {
         let cancelled = false;
 
         const autoEnd = async () => {
-            const pos = position;
+            const pos = getActionPosition('break_end');
             if (!pos) {
                 if (!cancelled) {
                     setBreakError('Could not auto-end break: location unavailable.');
@@ -374,7 +384,7 @@ export default function StaffDashboard() {
         return () => {
             cancelled = true;
         };
-    }, [activeBreak, BREAK_DURATION_SECONDS, position, openLog, fetchBreakData]);
+    }, [activeBreak, BREAK_DURATION_SECONDS, getActionPosition, openLog, fetchBreakData]);
 
     const fetchAllTasks = useCallback(async () => {
         if (!session) return;
@@ -431,12 +441,18 @@ export default function StaffDashboard() {
     }
 
     async function handleClock(action: 'check_in' | 'check_out') {
-        if (!position) return;
+        const pos = getActionPosition(action);
+        if (!pos) {
+            setClockError(action === 'check_out'
+                ? 'Location unavailable. Tap Try Again to refresh GPS and check out.'
+                : 'Location required to check in.');
+            return;
+        }
         setClockLoading(true);
         setClockError('');
         setClockSuccess('');
 
-        const result = await clockAction(action, position.lat, position.lng);
+        const result = await clockAction(action, pos.lat, pos.lng);
 
         if (result.success) {
             setClockSuccess(result.data?.message as string || 'Success!');
@@ -449,11 +465,17 @@ export default function StaffDashboard() {
     }
 
     async function handleBreak(action: 'break_start' | 'break_end') {
-        if (!position) return;
+        const pos = getActionPosition(action);
+        if (!pos) {
+            setBreakError(action === 'break_end'
+                ? 'Location unavailable. Tap Try Again and then end break.'
+                : 'Location required to start break.');
+            return;
+        }
         setBreakLoading(true);
         setBreakError('');
         setBreakSuccess('');
-        const result = await clockAction(action, position.lat, position.lng);
+        const result = await clockAction(action, pos.lat, pos.lng);
         if (result.success) {
             setBreakSuccess(action === 'break_start' ? 'Break started. 30:00 remaining.' : 'Break ended.');
             if (openLog) fetchBreakData(openLog.id);
@@ -673,34 +695,40 @@ export default function StaffDashboard() {
                         <div style={styles.errorBanner} className="animate-fadeIn">⚠️ {clockError}</div>
                     )}
 
-                    {geoStatus === 'idle' && (
-                        <button onClick={getLocation} className="btn-primary" style={styles.cardBtn}>
-                            📍 {t(lang, 'attNeedLocation')}
-                        </button>
-                    )}
-                    {geoStatus === 'loading' && (
-                        <div style={styles.cardSub}>⏳ {t(lang, 'loadingTitle')}</div>
-                    )}
-                    {geoStatus === 'too_far' && (
-                        <div style={styles.warningBanner}>🚫 {t(lang, 'attTooFar')}</div>
-                    )}
-                    {geoStatus === 'error' && (
-                        <button onClick={getLocation} className="btn-primary" style={styles.cardBtn}>
-                            {t(lang, 'tryAgain')}
-                        </button>
-                    )}
-                    {geoStatus === 'ok' && (
-                        <div style={styles.btnRow}>
-                            {!isCheckedIn ? (
-                                <button
-                                    onClick={() => handleClock('check_in')}
-                                    className="btn-primary"
-                                    disabled={clockLoading}
-                                    style={{ flex: 1 }}
-                                >
-                                    {clockLoading ? '...' : t(lang, 'attCheckInBtn')}
+                    {!isCheckedIn ? (
+                        <>
+                            {geoStatus === 'idle' && (
+                                <button onClick={getLocation} className="btn-primary" style={styles.cardBtn}>
+                                    📍 {t(lang, 'attNeedLocation')}
                                 </button>
-                            ) : (
+                            )}
+                            {geoStatus === 'loading' && (
+                                <div style={styles.cardSub}>⏳ {t(lang, 'loadingTitle')}</div>
+                            )}
+                            {geoStatus === 'too_far' && (
+                                <div style={styles.warningBanner}>🚫 {t(lang, 'attTooFar')}</div>
+                            )}
+                            {geoStatus === 'error' && (
+                                <button onClick={getLocation} className="btn-primary" style={styles.cardBtn}>
+                                    {t(lang, 'tryAgain')}
+                                </button>
+                            )}
+                            {geoStatus === 'ok' && (
+                                <div style={styles.btnRow}>
+                                    <button
+                                        onClick={() => handleClock('check_in')}
+                                        className="btn-primary"
+                                        disabled={clockLoading}
+                                        style={{ flex: 1 }}
+                                    >
+                                        {clockLoading ? '...' : t(lang, 'attCheckInBtn')}
+                                    </button>
+                                </div>
+                            )}
+                        </>
+                    ) : (
+                        <>
+                            <div style={styles.btnRow}>
                                 <button
                                     onClick={() => handleClock('check_out')}
                                     className="btn-secondary"
@@ -709,8 +737,21 @@ export default function StaffDashboard() {
                                 >
                                     {clockLoading ? '...' : t(lang, 'attCheckOutBtn')}
                                 </button>
+                            </div>
+                            {!position && openLog?.gps_lat != null && openLog?.gps_lng != null && (
+                                <p style={{ color: '#888', fontSize: 12, marginTop: 8, textAlign: 'center' }}>
+                                    Using last check-in location because live GPS is unavailable.
+                                </p>
                             )}
-                        </div>
+                            {(geoStatus === 'idle' || geoStatus === 'error' || geoStatus === 'too_far') && (
+                                <button onClick={getLocation} className="btn-primary" style={{ ...styles.cardBtn, marginTop: 10 }}>
+                                    {t(lang, 'tryAgain')}
+                                </button>
+                            )}
+                            {geoStatus === 'loading' && (
+                                <div style={{ ...styles.cardSub, marginTop: 8 }}>⏳ {t(lang, 'loadingTitle')}</div>
+                            )}
+                        </>
                     )}
                 </div>
 

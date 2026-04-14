@@ -191,9 +191,60 @@ export default function AdminDashboard() {
         }
     }
 
+    async function closeOpenTimeLogsForDeactivation(staff: Staff): Promise<string | null> {
+        const { data: openLogs, error: openLogsError } = await supabase
+            .from('time_logs')
+            .select('id, check_in')
+            .eq('staff_id', staff.id)
+            .is('check_out', null);
+
+        if (openLogsError) return openLogsError.message;
+        if (!openLogs || openLogs.length === 0) return null;
+
+        const nowIso = new Date().toISOString();
+
+        for (const log of openLogs as { id: string; check_in: string }[]) {
+            const totalHours = Math.max(0, Number(((Date.now() - new Date(log.check_in).getTime()) / 3600000).toFixed(2)));
+
+            const { error: closeLogError } = await supabase
+                .from('time_logs')
+                .update({
+                    check_out: nowIso,
+                    total_hours: totalHours,
+                })
+                .eq('id', log.id);
+            if (closeLogError) return closeLogError.message;
+
+            const { error: closeBreakError } = await supabase
+                .from('breaks')
+                .update({ break_end: nowIso })
+                .eq('time_log_id', log.id)
+                .is('break_end', null);
+            if (closeBreakError) return closeBreakError.message;
+
+            const { error: cancelAssignmentError } = await supabase
+                .from('shift_assignments')
+                .update({ status: 'cancelled' })
+                .eq('time_log_id', log.id);
+            if (cancelAssignmentError) return cancelAssignmentError.message;
+        }
+
+        return null;
+    }
+
     async function toggleStaffActive(staff: Staff) {
         setStaffActionError('');
         setStaffActionLoadingId(`toggle-${staff.id}`);
+        const deactivating = staff.active;
+        if (deactivating) {
+            const closeError = await closeOpenTimeLogsForDeactivation(staff);
+            if (closeError) {
+                setStaffActionLoadingId(null);
+                setStaffActionError(`Could not deactivate ${staff.name}: ${closeError}`);
+                return;
+            }
+        }
+
         const { error } = await supabase.from('staff').update({ active: !staff.active }).eq('id', staff.id);
         setStaffActionLoadingId(null);
         if (error) {
@@ -201,6 +252,7 @@ export default function AdminDashboard() {
             return;
         }
         fetchStaff();
+        fetchLogs();
     }
 
     async function deleteStaffPermanently(staff: Staff) {
