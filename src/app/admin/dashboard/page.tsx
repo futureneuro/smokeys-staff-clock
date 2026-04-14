@@ -213,18 +213,49 @@ export default function AdminDashboard() {
         if (!confirmed) return;
 
         setStaffActionLoadingId(`delete-${staff.id}`);
+        let result: { ok?: boolean; error?: string } | null = null;
+        let finalError: string | null = null;
+
         const { data, error } = await supabase.rpc('delete_staff_permanently', {
             p_staff_id: staff.id,
             p_actor_admin_id: admin?.id || null,
         });
+
+        // Some deployments may not have this RPC yet (or have stale schema cache).
+        // Fallback to guarded direct-delete to keep admin workflow functional.
+        if (error?.message?.includes('Could not find the function public.delete_staff_permanently')) {
+            const { count, error: openLogsError } = await supabase
+                .from('time_logs')
+                .select('id', { count: 'exact', head: true })
+                .eq('staff_id', staff.id)
+                .is('check_out', null);
+
+            if (openLogsError) {
+                finalError = openLogsError.message;
+            } else if ((count || 0) > 0) {
+                finalError = 'Staff has an open time log. Check out first.';
+            } else {
+                const { error: deleteError } = await supabase.from('staff').delete().eq('id', staff.id);
+                if (deleteError) {
+                    finalError = deleteError.code === '23503'
+                        ? 'Cannot delete this staff member because related records exist. Deactivate instead.'
+                        : deleteError.message;
+                } else {
+                    result = { ok: true };
+                }
+            }
+        } else if (error) {
+            finalError = error.message;
+        } else {
+            result = data as { ok?: boolean; error?: string } | null;
+        }
         setStaffActionLoadingId(null);
 
-        if (error) {
-            setStaffActionError(error.message);
+        if (finalError) {
+            setStaffActionError(finalError);
             return;
         }
 
-        const result = data as { ok?: boolean; error?: string } | null;
         if (!result?.ok) {
             setStaffActionError(result?.error || 'Could not delete this staff member.');
             return;
