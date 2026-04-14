@@ -2764,7 +2764,7 @@ interface LateAttendanceNotification {
     sent_at: string | null;
     error_message: string | null;
     created_at: string;
-    staff?: { name: string; staff_code: string } | null;
+    staff?: { name: string; staff_code: string } | { name: string; staff_code: string }[] | null;
 }
 
 interface LateAttendanceReason {
@@ -2773,7 +2773,7 @@ interface LateAttendanceReason {
     source: string;
     submitted_at: string;
     shift_date?: string;
-    staff?: { name: string; staff_code: string } | null;
+    staff?: { name: string; staff_code: string } | { name: string; staff_code: string }[] | null;
 }
 
 function LateAttendancePanel() {
@@ -2809,6 +2809,10 @@ function LateAttendancePanel() {
         fetchLateAttendanceData();
     }, [fetchLateAttendanceData]);
 
+    const firstStaff = (
+        staff: LateAttendanceNotification['staff'] | LateAttendanceReason['staff'],
+    ) => (Array.isArray(staff) ? staff[0] : staff);
+
     const badgeStyle = (status: string) => {
         if (status === 'sent') return { color: '#22c55e', background: 'rgba(34,197,94,0.12)' };
         if (status === 'failed') return { color: '#ef4444', background: 'rgba(239,68,68,0.12)' };
@@ -2833,12 +2837,13 @@ function LateAttendancePanel() {
                         {notifications.length === 0 ? (
                             <p style={{ color: '#555', fontSize: 12, margin: 0 }}>No late SMS records yet.</p>
                         ) : notifications.map(item => {
+                            const staff = firstStaff(item.staff);
                             const style = badgeStyle(item.status);
                             return (
                                 <div key={item.id} style={{ borderBottom: '1px solid #1f1f1f', padding: '8px 0' }}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                                         <div style={{ color: '#ccc', fontSize: 12 }}>
-                                            {item.staff?.name || 'Unknown'} ({item.staff?.staff_code || 'N/A'})
+                                            {staff?.name || 'Unknown'} ({staff?.staff_code || 'N/A'})
                                         </div>
                                         <span style={{ fontSize: 11, borderRadius: 999, padding: '3px 8px', ...style }}>{item.status}</span>
                                     </div>
@@ -2855,17 +2860,20 @@ function LateAttendancePanel() {
                         <h4 style={{ color: '#ddd', fontSize: 13, margin: '0 0 10px' }}>Late Reasons Submitted (Today)</h4>
                         {reasons.length === 0 ? (
                             <p style={{ color: '#555', fontSize: 12, margin: 0 }}>No reasons submitted today.</p>
-                        ) : reasons.map(item => (
-                            <div key={item.id} style={{ borderBottom: '1px solid #1f1f1f', padding: '8px 0' }}>
-                                <div style={{ color: '#ccc', fontSize: 12 }}>
-                                    {item.staff?.name || 'Unknown'} ({item.staff?.staff_code || 'N/A'})
+                        ) : reasons.map(item => {
+                            const staff = firstStaff(item.staff);
+                            return (
+                                <div key={item.id} style={{ borderBottom: '1px solid #1f1f1f', padding: '8px 0' }}>
+                                    <div style={{ color: '#ccc', fontSize: 12 }}>
+                                        {staff?.name || 'Unknown'} ({staff?.staff_code || 'N/A'})
+                                    </div>
+                                    <div style={{ color: '#888', fontSize: 11, marginTop: 3 }}>
+                                        {new Date(item.submitted_at).toLocaleTimeString()} · {item.source}
+                                    </div>
+                                    <div style={{ color: '#bbb', fontSize: 12, marginTop: 4, whiteSpace: 'pre-wrap' }}>{item.reason_text}</div>
                                 </div>
-                                <div style={{ color: '#888', fontSize: 11, marginTop: 3 }}>
-                                    {new Date(item.submitted_at).toLocaleTimeString()} · {item.source}
-                                </div>
-                                <div style={{ color: '#bbb', fontSize: 12, marginTop: 4, whiteSpace: 'pre-wrap' }}>{item.reason_text}</div>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             )}
