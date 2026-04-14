@@ -56,6 +56,7 @@ interface TaskStatusDef {
 type Tab = 'home' | 'history' | 'tasks' | 'profile';
 
 export default function StaffDashboard() {
+    const BREAK_DURATION_SECONDS = 30 * 60;
     const router = useRouter();
     const [session, setSession] = useState<StaffSession | null>(null);
     const [loading, setLoading] = useState(true);
@@ -108,6 +109,13 @@ export default function StaffDashboard() {
     const [breakLoading, setBreakLoading] = useState(false);
     const [breakError, setBreakError] = useState('');
     const [breakSuccess, setBreakSuccess] = useState('');
+    const autoEndingBreakRef = useRef(false);
+    const [isLateForShift, setIsLateForShift] = useState(false);
+    const [lateReasonId, setLateReasonId] = useState<string | null>(null);
+    const [lateReasonText, setLateReasonText] = useState('');
+    const [lateReasonSaved, setLateReasonSaved] = useState(false);
+    const [lateReasonSubmitting, setLateReasonSubmitting] = useState(false);
+    const [lateReasonError, setLateReasonError] = useState('');
 
     useEffect(() => {
         const saved = localStorage.getItem('smokeys_lang') as Lang | null;
@@ -149,13 +157,17 @@ export default function StaffDashboard() {
                 // Auto clock out at the check-in time + 10 hours
                 const autoCheckOut = new Date(checkInTime + 10 * 60 * 60 * 1000);
                 const totalHrs = 10;
-                await supabase
+                const { error: autoOutError } = await supabase
                     .from('time_logs')
                     .update({
                         check_out: autoCheckOut.toISOString(),
                         total_hours: totalHrs,
                     })
                     .eq('id', currentOpenLog.id);
+                if (autoOutError) {
+                    setClockError(autoOutError.message);
+                    return;
+                }
                 setAutoClockOutLog({ ...currentOpenLog, check_out: autoCheckOut.toISOString(), total_hours: totalHrs });
                 setShowClockOutCorrection(true);
                 setOpenLog(null);
@@ -196,6 +208,7 @@ export default function StaffDashboard() {
 
         // Alerts
         const newAlerts: string[] = [];
+        let lateNow = false;
         if (shiftAssignments && shiftAssignments.length > 0) {
             const sa = shiftAssignments[0] as any;
             const sd = sa.shift_definition;
@@ -205,11 +218,14 @@ export default function StaffDashboard() {
                 const [h, m] = shiftStart.split(':').map(Number);
                 const shiftTime = new Date(now);
                 shiftTime.setHours(h, m, 0, 0);
-                if (now > shiftTime && !(logs && logs.length > 0)) {
+                const lateAt = new Date(shiftTime.getTime() + (sd.late_grace_minutes ?? 10) * 60 * 1000);
+                if (now > lateAt && !(logs && logs.length > 0)) {
+                    lateNow = true;
                     newAlerts.push(t(lang, 'alertLate'));
                 }
             }
         }
+        setIsLateForShift(lateNow);
 
         // Check for yesterday's unclosed log
         const yesterday = new Date();
@@ -231,6 +247,31 @@ export default function StaffDashboard() {
             newAlerts.push('⏰ You were auto-clocked out after 10+ hours. Please correct your clock-out time.');
         }
         setAlerts(newAlerts);
+
+        if (lateNow && shiftAssignments && shiftAssignments.length > 0) {
+            const shiftAssignmentId = (shiftAssignments[0] as any).id as string;
+            const { data: existingReason } = await supabase
+                .from('late_attendance_reasons')
+                .select('id, reason_text')
+                .eq('staff_id', session.staff.id)
+                .eq('shift_assignment_id', shiftAssignmentId)
+                .eq('reason_date', today)
+                .limit(1);
+            if (existingReason && existingReason.length > 0) {
+                setLateReasonId(existingReason[0].id);
+                setLateReasonText(existingReason[0].reason_text || '');
+                setLateReasonSaved(true);
+                setLateReasonError('');
+            } else {
+                setLateReasonId(null);
+                setLateReasonSaved(false);
+            }
+        } else {
+            setLateReasonId(null);
+            setLateReasonSaved(false);
+            setLateReasonText('');
+            setLateReasonError('');
+        }
     }, [session, today, lang]);
 
     useEffect(() => {
@@ -278,12 +319,62 @@ export default function StaffDashboard() {
 
     // Live break timer
     useEffect(() => {
-        if (!activeBreak) { setBreakTimer(0); return; }
-        const tick = setInterval(() => {
-            setBreakTimer(Math.floor((Date.now() - new Date(activeBreak.break_start).getTime()) / 1000));
-        }, 1000);
+        if (!activeBreak) {
+            setBreakTimer(0);
+            autoEndingBreakRef.current = false;
+            return;
+        }
+        const updateTimer = () => {
+            const elapsed = Math.floor((Date.now() - new Date(activeBreak.break_start).getTime()) / 1000);
+            const remaining = Math.max(0, BREAK_DURATION_SECONDS - elapsed);
+            setBreakTimer(remaining);
+        };
+        // Update immediately so first render is not 0:00
+        updateTimer();
+        const tick = setInterval(updateTimer, 1000);
         return () => clearInterval(tick);
-    }, [activeBreak]);
+    }, [activeBreak, BREAK_DURATION_SECONDS]);
+
+    // Auto-end break at 00:00 so staff do not need to tap "End Break"
+    useEffect(() => {
+        if (!activeBreak || autoEndingBreakRef.current) return;
+        const elapsed = Math.floor((Date.now() - new Date(activeBreak.break_start).getTime()) / 1000);
+        if (elapsed < BREAK_DURATION_SECONDS) return;
+        autoEndingBreakRef.current = true;
+        let cancelled = false;
+
+        const autoEnd = async () => {
+            const pos = position;
+            if (!pos) {
+                if (!cancelled) {
+                    setBreakError('Could not auto-end break: location unavailable.');
+                    autoEndingBreakRef.current = false;
+                }
+                return;
+            }
+
+            setBreakLoading(true);
+            setBreakError('');
+            const result = await clockAction('break_end', pos.lat, pos.lng);
+            if (cancelled) return;
+
+            if (result.success) {
+                setBreakSuccess('Break auto-ended after 30 minutes.');
+                if (openLog) fetchBreakData(openLog.id);
+                setTimeout(() => setBreakSuccess(''), 5000);
+            } else {
+                setBreakError(result.error || 'Failed to auto-end break.');
+                autoEndingBreakRef.current = false;
+            }
+            setBreakLoading(false);
+        };
+
+        autoEnd();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [activeBreak, BREAK_DURATION_SECONDS, position, openLog, fetchBreakData]);
 
     const fetchAllTasks = useCallback(async () => {
         if (!session) return;
@@ -364,13 +455,56 @@ export default function StaffDashboard() {
         setBreakSuccess('');
         const result = await clockAction(action, position.lat, position.lng);
         if (result.success) {
-            setBreakSuccess(result.data?.message as string || (action === 'break_start' ? 'Break started.' : 'Break ended.'));
+            setBreakSuccess(action === 'break_start' ? 'Break started. 30:00 remaining.' : 'Break ended.');
             if (openLog) fetchBreakData(openLog.id);
             setTimeout(() => setBreakSuccess(''), 5000);
         } else {
             setBreakError(result.error || 'Failed');
         }
         setBreakLoading(false);
+    }
+
+    async function submitLateReason() {
+        if (!session || !todayShift) return;
+        const reason = lateReasonText.trim();
+        if (!reason) return;
+        setLateReasonSubmitting(true);
+        setLateReasonError('');
+
+        if (lateReasonId) {
+            const { error } = await supabase
+                .from('late_attendance_reasons')
+                .update({ reason_text: reason, submitted_at: new Date().toISOString() })
+                .eq('id', lateReasonId);
+            if (error) {
+                setLateReasonError(error.message);
+                setLateReasonSubmitting(false);
+                return;
+            }
+            setLateReasonSaved(true);
+            setLateReasonSubmitting(false);
+            return;
+        }
+
+        const { data, error } = await supabase
+            .from('late_attendance_reasons')
+            .insert({
+                staff_id: session.staff.id,
+                shift_assignment_id: todayShift.id,
+                reason_text: reason,
+                source: 'app',
+                reason_date: today,
+            })
+            .select('id')
+            .limit(1);
+
+        if (error) {
+            setLateReasonError(error.message);
+        } else {
+            setLateReasonSaved(true);
+            setLateReasonId(data && data.length > 0 ? data[0].id : null);
+        }
+        setLateReasonSubmitting(false);
     }
 
     async function handleClockOutCorrection() {
@@ -387,13 +521,18 @@ export default function StaffDashboard() {
                 correctedCheckOut.setDate(correctedCheckOut.getDate() + 1);
             }
             const totalHrs = (correctedCheckOut.getTime() - checkInDate.getTime()) / (1000 * 60 * 60);
-            await supabase
+            const { error: correctionError } = await supabase
                 .from('time_logs')
                 .update({
                     check_out: correctedCheckOut.toISOString(),
                     total_hours: Math.round(totalHrs * 100) / 100,
                 })
                 .eq('id', autoClockOutLog.id);
+            if (correctionError) {
+                setClockError(correctionError.message);
+                setCorrectionSaving(false);
+                return;
+            }
             setShowClockOutCorrection(false);
             setAutoClockOutLog(null);
             setCorrectionTime('');
@@ -575,6 +714,40 @@ export default function StaffDashboard() {
                     )}
                 </div>
 
+                {isLateForShift && !isCheckedIn && todayShift && (
+                    <div style={{ ...styles.card, border: '1px solid rgba(239,68,68,0.35)' }}>
+                        <div style={styles.cardHeader}>
+                            <span style={styles.cardIcon}>📝</span>
+                            <h3 style={{ ...styles.cardTitle, color: '#ef4444' }}>Late Check-In Reason</h3>
+                            {lateReasonSaved && (
+                                <span style={{ marginLeft: 'auto', color: '#22c55e', fontSize: 11, background: 'rgba(34,197,94,0.12)', borderRadius: 999, padding: '3px 8px' }}>
+                                    Saved
+                                </span>
+                            )}
+                        </div>
+                        <p style={{ color: '#999', fontSize: 12, margin: '0 0 10px' }}>
+                            Tell us why you are late today so management can track special situations.
+                        </p>
+                        <textarea
+                            className="input-field"
+                            rows={3}
+                            value={lateReasonText}
+                            onChange={e => { setLateReasonText(e.target.value); setLateReasonSaved(false); }}
+                            placeholder="Write your reason..."
+                            style={{ resize: 'vertical', marginBottom: 10 }}
+                        />
+                        {lateReasonError && <p style={{ color: '#ef4444', fontSize: 12, margin: '0 0 8px' }}>{lateReasonError}</p>}
+                        <button
+                            onClick={submitLateReason}
+                            className="btn-secondary"
+                            disabled={lateReasonSubmitting || !lateReasonText.trim()}
+                            style={{ width: '100%' }}
+                        >
+                            {lateReasonSubmitting ? 'Saving...' : lateReasonSaved ? 'Update Reason' : 'Submit Reason'}
+                        </button>
+                    </div>
+                )}
+
                 {/* Auto Clock-Out Correction Card */}
                 {showClockOutCorrection && autoClockOutLog && (
                     <div style={{ ...styles.card, borderColor: '#ef4444', borderWidth: 1, borderStyle: 'solid' }}>
@@ -704,30 +877,46 @@ export default function StaffDashboard() {
                                 <div style={{ color: '#f59e0b', fontSize: 28, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
                                     {`${Math.floor(breakTimer / 60)}:${(breakTimer % 60).toString().padStart(2, '0')}`}
                                 </div>
-                                <div style={{ color: '#888', fontSize: 12, marginTop: 2 }}>Break in progress</div>
+                                <div style={{ color: '#888', fontSize: 12, marginTop: 2 }}>
+                                    {breakTimer === 0 ? 'Auto-ending break...' : 'Break time remaining'}
+                                </div>
                             </div>
                         )}
 
                         {breakError && <p style={{ color: '#ef4444', fontSize: 13, marginBottom: 8, textAlign: 'center' }}>{breakError}</p>}
                         {breakSuccess && <p style={{ color: '#22c55e', fontSize: 13, marginBottom: 8, textAlign: 'center' }}>{breakSuccess}</p>}
 
-                        {geoStatus === 'ok' ? (
+                        {activeBreak ? (
                             <button
-                                onClick={() => handleBreak(activeBreak ? 'break_end' : 'break_start')}
+                                disabled
+                                style={{
+                                    width: '100%', padding: '14px', borderRadius: 14,
+                                    background: 'rgba(245,158,11,0.15)',
+                                    border: '2px solid #f59e0b',
+                                    color: '#f59e0b',
+                                    fontSize: 15, fontWeight: 700, cursor: 'not-allowed',
+                                    transition: 'all 0.2s', opacity: breakLoading ? 0.6 : 1,
+                                }}
+                            >
+                                {breakLoading ? '...' : '⏳ Break auto-ends at 00:00'}
+                            </button>
+                        ) : geoStatus === 'ok' ? (
+                            <button
+                                onClick={() => handleBreak('break_start')}
                                 disabled={breakLoading}
                                 style={{
                                     width: '100%', padding: '14px', borderRadius: 14,
-                                    background: activeBreak ? 'rgba(245,158,11,0.15)' : 'rgba(34,197,94,0.1)',
-                                    border: `2px solid ${activeBreak ? '#f59e0b' : '#22c55e'}`,
-                                    color: activeBreak ? '#f59e0b' : '#22c55e',
+                                    background: 'rgba(34,197,94,0.1)',
+                                    border: '2px solid #22c55e',
+                                    color: '#22c55e',
                                     fontSize: 15, fontWeight: 700, cursor: breakLoading ? 'not-allowed' : 'pointer',
                                     transition: 'all 0.2s', opacity: breakLoading ? 0.6 : 1,
                                 }}
                             >
-                                {breakLoading ? '...' : activeBreak ? '⏹ End Break' : '▶ Start Break'}
+                                {breakLoading ? '...' : '▶ Start Break'}
                             </button>
                         ) : (
-                            <p style={{ color: '#555', fontSize: 12, textAlign: 'center' }}>Location required to start/end break.</p>
+                            <p style={{ color: '#555', fontSize: 12, textAlign: 'center' }}>Location required to start break.</p>
                         )}
                     </div>
                 )}

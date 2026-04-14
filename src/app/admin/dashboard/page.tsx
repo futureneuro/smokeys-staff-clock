@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { supabase } from '@/lib/supabase';
+import { EDGE_FUNCTIONS_BASE_URL, supabase } from '@/lib/supabase';
 
 interface AdminSession {
     id: string;
@@ -17,6 +17,8 @@ interface Staff {
     name: string;
     role: string;
     active: boolean;
+    phone_number?: string | null;
+    sms_opt_in?: boolean;
     created_at: string;
 }
 
@@ -45,9 +47,18 @@ export default function AdminDashboard() {
     // Staff form
     const [showStaffForm, setShowStaffForm] = useState(false);
     const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
-    const [staffForm, setStaffForm] = useState({ name: '', staff_code: '', pin: '', role: 'staff' });
+    const [staffForm, setStaffForm] = useState({
+        name: '',
+        staff_code: '',
+        pin: '',
+        role: 'staff',
+        phone_number: '',
+        sms_opt_in: true,
+    });
     const [staffFormError, setStaffFormError] = useState('');
     const [staffFormLoading, setStaffFormLoading] = useState(false);
+    const [staffActionError, setStaffActionError] = useState('');
+    const [staffActionLoadingId, setStaffActionLoadingId] = useState<string | null>(null);
 
     // Filters
     const [dateFrom, setDateFrom] = useState('');
@@ -116,6 +127,8 @@ export default function AdminDashboard() {
                     name: staffForm.name,
                     staff_code: staffForm.staff_code.toUpperCase(),
                     role: staffForm.role,
+                    phone_number: staffForm.phone_number.trim() || null,
+                    sms_opt_in: staffForm.sms_opt_in,
                 };
 
                 if (staffForm.pin) {
@@ -150,11 +163,26 @@ export default function AdminDashboard() {
                     setStaffFormLoading(false);
                     return;
                 }
+
+                await supabase
+                    .from('staff')
+                    .update({
+                        phone_number: staffForm.phone_number.trim() || null,
+                        sms_opt_in: staffForm.sms_opt_in,
+                    })
+                    .eq('staff_code', staffForm.staff_code.toUpperCase());
             }
 
             setShowStaffForm(false);
             setEditingStaff(null);
-            setStaffForm({ name: '', staff_code: '', pin: '', role: 'staff' });
+            setStaffForm({
+                name: '',
+                staff_code: '',
+                pin: '',
+                role: 'staff',
+                phone_number: '',
+                sms_opt_in: true,
+            });
             fetchStaff();
         } catch {
             setStaffFormError('An error occurred.');
@@ -164,13 +192,58 @@ export default function AdminDashboard() {
     }
 
     async function toggleStaffActive(staff: Staff) {
-        await supabase.from('staff').update({ active: !staff.active }).eq('id', staff.id);
+        setStaffActionError('');
+        setStaffActionLoadingId(`toggle-${staff.id}`);
+        const { error } = await supabase.from('staff').update({ active: !staff.active }).eq('id', staff.id);
+        setStaffActionLoadingId(null);
+        if (error) {
+            setStaffActionError(error.message);
+            return;
+        }
         fetchStaff();
+    }
+
+    async function deleteStaffPermanently(staff: Staff) {
+        setStaffActionError('');
+        if (staff.id === admin?.id) {
+            setStaffActionError('You cannot delete your current admin account.');
+            return;
+        }
+        const confirmed = window.confirm(`Delete ${staff.name} permanently? This cannot be undone.`);
+        if (!confirmed) return;
+
+        setStaffActionLoadingId(`delete-${staff.id}`);
+        const { data, error } = await supabase.rpc('delete_staff_permanently', {
+            p_staff_id: staff.id,
+            p_actor_admin_id: admin?.id || null,
+        });
+        setStaffActionLoadingId(null);
+
+        if (error) {
+            setStaffActionError(error.message);
+            return;
+        }
+
+        const result = data as { ok?: boolean; error?: string } | null;
+        if (!result?.ok) {
+            setStaffActionError(result?.error || 'Could not delete this staff member.');
+            return;
+        }
+
+        fetchStaff();
+        fetchLogs();
     }
 
     function editStaff(staff: Staff) {
         setEditingStaff(staff);
-        setStaffForm({ name: staff.name, staff_code: staff.staff_code, pin: '', role: staff.role });
+        setStaffForm({
+            name: staff.name,
+            staff_code: staff.staff_code,
+            pin: '',
+            role: staff.role,
+            phone_number: staff.phone_number || '',
+            sms_opt_in: staff.sms_opt_in ?? true,
+        });
         setShowStaffForm(true);
     }
 
@@ -250,7 +323,7 @@ export default function AdminDashboard() {
                             <button
                                 onClick={() => {
                                     setEditingStaff(null);
-                                    setStaffForm({ name: '', staff_code: '', pin: '', role: 'staff' });
+                                    setStaffForm({ name: '', staff_code: '', pin: '', role: 'staff', phone_number: '', sms_opt_in: true });
                                     setShowStaffForm(true);
                                 }}
                                 className="btn-primary"
@@ -308,6 +381,27 @@ export default function AdminDashboard() {
                                                 <option value="admin">Admin</option>
                                             </select>
                                         </div>
+                                        <div style={styles.inputGroup}>
+                                            <label style={styles.formLabel}>Phone (E.164)</label>
+                                            <input
+                                                className="input-field"
+                                                value={staffForm.phone_number}
+                                                onChange={e => setStaffForm({ ...staffForm, phone_number: e.target.value })}
+                                                placeholder="+573001234567"
+                                            />
+                                        </div>
+                                        <div style={styles.inputGroup}>
+                                            <label style={styles.formLabel}>SMS Notifications</label>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#bbb', paddingTop: 10 }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={staffForm.sms_opt_in}
+                                                    onChange={e => setStaffForm({ ...staffForm, sms_opt_in: e.target.checked })}
+                                                    style={{ accentColor: '#f0b427' }}
+                                                />
+                                                Receive late-attendance SMS
+                                            </label>
+                                        </div>
                                     </div>
                                     {staffFormError && <p style={styles.formError}>⚠️ {staffFormError}</p>}
                                     <div style={styles.formActions}>
@@ -320,12 +414,19 @@ export default function AdminDashboard() {
                             </div>
                         )}
 
+                        {staffActionError && (
+                            <div style={{ ...styles.formError, marginBottom: 12 }}>
+                                ⚠️ {staffActionError}
+                            </div>
+                        )}
+
                         <div style={styles.tableContainer}>
                             <table style={styles.table}>
                                 <thead>
                                     <tr>
                                         <th style={styles.th}>Code</th>
                                         <th style={styles.th}>Name</th>
+                                        <th style={styles.th}>Phone</th>
                                         <th style={styles.th}>Role</th>
                                         <th style={styles.th}>Status</th>
                                         <th style={styles.th}>Actions</th>
@@ -336,6 +437,7 @@ export default function AdminDashboard() {
                                         <tr key={s.id} style={styles.tr}>
                                             <td style={styles.td}><code style={styles.code}>{s.staff_code}</code></td>
                                             <td style={styles.td}>{s.name}</td>
+                                            <td style={styles.td}>{s.phone_number || '—'}</td>
                                             <td style={styles.td}>
                                                 <span style={{
                                                     ...styles.badge,
@@ -355,9 +457,17 @@ export default function AdminDashboard() {
                                                     <button onClick={() => editStaff(s)} style={styles.actionBtn}>Edit</button>
                                                     <button
                                                         onClick={() => toggleStaffActive(s)}
+                                                        disabled={staffActionLoadingId === `toggle-${s.id}` || staffActionLoadingId === `delete-${s.id}`}
                                                         style={{ ...styles.actionBtn, color: s.active ? '#ef4444' : '#22c55e' }}
                                                     >
-                                                        {s.active ? 'Deactivate' : 'Activate'}
+                                                        {staffActionLoadingId === `toggle-${s.id}` ? 'Saving...' : s.active ? 'Deactivate' : 'Activate'}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => deleteStaffPermanently(s)}
+                                                        disabled={staffActionLoadingId === `toggle-${s.id}` || staffActionLoadingId === `delete-${s.id}`}
+                                                        style={{ ...styles.actionBtn, color: '#ef4444', borderColor: '#ef444466' }}
+                                                    >
+                                                        {staffActionLoadingId === `delete-${s.id}` ? 'Deleting...' : 'Delete'}
                                                     </button>
                                                 </div>
                                             </td>
@@ -495,7 +605,10 @@ export default function AdminDashboard() {
 
                 {/* ── MONITOR TAB ── */}
                 {activeTab === 'monitor' && (
-                    <MonitorPanel staffList={staffList} adminId={admin?.id || ''} />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                        <MonitorPanel adminId={admin?.id || ''} />
+                        <LateAttendancePanel />
+                    </div>
                 )}
 
                 {/* ── QR CODE TAB ── */}
@@ -2331,27 +2444,64 @@ interface ComplianceFlag {
     staff?: { name: string };
 }
 
-function MonitorPanel({ staffList, adminId }: { staffList: Staff[]; adminId: string }) {
+function MonitorPanel({ adminId }: { adminId: string }) {
     const [assignments, setAssignments] = useState<MonitorAssignment[]>([]);
     const [flags, setFlags] = useState<ComplianceFlag[]>([]);
     const [summary, setSummary] = useState<Record<string, number>>({});
     const [loading, setLoading] = useState(true);
+    const [monitorError, setMonitorError] = useState('');
     const [now, setNow] = useState(new Date());
     const [overrideModal, setOverrideModal] = useState<{ type: string; staffId: string; staffName: string; timeLogId?: string; breakId?: string } | null>(null);
     const [overrideReason, setOverrideReason] = useState('');
     const [overrideSaving, setOverrideSaving] = useState(false);
-    const edgeFnBase = process.env.NEXT_PUBLIC_SUPABASE_URL?.replace('supabase.co', 'supabase.co/functions/v1') || '';
+    const edgeFnBase = EDGE_FUNCTIONS_BASE_URL;
     const todayStr = new Date().toISOString().slice(0, 10);
 
     const fetchMonitor = useCallback(async () => {
+        if (!edgeFnBase) {
+            setAssignments([]);
+            setFlags([]);
+            setSummary({});
+            setMonitorError('Missing NEXT_PUBLIC_SUPABASE_URL. Monitor endpoint is not configured.');
+            setLoading(false);
+            return;
+        }
         try {
+            setMonitorError('');
             const res = await fetch(`${edgeFnBase}/monitor-status?date=${todayStr}`);
-            if (res.ok) {
-                const data = await res.json();
-                setAssignments(data.assignments || []);
-                setFlags(data.flags || []);
-                setSummary(data.summary || {});
+            let payload: Record<string, unknown> = {};
+            let message = '';
+            const contentType = res.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                try {
+                    payload = (await res.json()) as Record<string, unknown>;
+                } catch {
+                    message = 'Invalid monitor response payload.';
+                }
+            } else {
+                try {
+                    const text = await res.text();
+                    message = text.trim() || 'Monitor endpoint returned an empty response.';
+                } catch {
+                    message = 'Could not read monitor endpoint response.';
+                }
             }
+            if (!res.ok) {
+                setAssignments([]);
+                setFlags([]);
+                setSummary({});
+                setMonitorError((payload.error as string) || message || 'Failed to load monitor data.');
+                return;
+            }
+
+            setAssignments((payload.assignments as MonitorAssignment[]) || []);
+            setFlags((payload.flags as ComplianceFlag[]) || []);
+            setSummary((payload.summary as Record<string, number>) || {});
+        } catch {
+            setAssignments([]);
+            setFlags([]);
+            setSummary({});
+            setMonitorError('Monitor endpoint request failed. Please try again.');
         } finally {
             setLoading(false);
         }
@@ -2468,6 +2618,12 @@ function MonitorPanel({ staffList, adminId }: { staffList: Staff[]; adminId: str
                     </div>
                 ))}
             </div>
+
+            {monitorError && (
+                <div style={{ marginBottom: 16, padding: '10px 12px', borderRadius: 10, border: '1px solid rgba(239,68,68,0.4)', background: 'rgba(239,68,68,0.08)', color: '#ef4444', fontSize: 13 }}>
+                    ⚠️ {monitorError}
+                </div>
+            )}
 
             {/* Staff Cards */}
             {loading ? (
@@ -2601,6 +2757,123 @@ function MonitorPanel({ staffList, adminId }: { staffList: Staff[]; adminId: str
 }
 
 
+interface LateAttendanceNotification {
+    id: string;
+    shift_date: string;
+    status: string;
+    sent_at: string | null;
+    error_message: string | null;
+    created_at: string;
+    staff?: { name: string; staff_code: string } | null;
+}
+
+interface LateAttendanceReason {
+    id: string;
+    reason_text: string;
+    source: string;
+    submitted_at: string;
+    shift_date?: string;
+    staff?: { name: string; staff_code: string } | null;
+}
+
+function LateAttendancePanel() {
+    const [notifications, setNotifications] = useState<LateAttendanceNotification[]>([]);
+    const [reasons, setReasons] = useState<LateAttendanceReason[]>([]);
+    const [loading, setLoading] = useState(false);
+
+    const fetchLateAttendanceData = useCallback(async () => {
+        setLoading(true);
+        const today = new Date().toISOString().slice(0, 10);
+
+        const [{ data: notifData }, { data: reasonData }] = await Promise.all([
+            supabase
+                .from('late_attendance_notifications')
+                .select('id, shift_date, status, sent_at, error_message, created_at, staff:staff(id, name, staff_code)')
+                .eq('shift_date', today)
+                .order('created_at', { ascending: false })
+                .limit(50),
+            supabase
+                .from('late_attendance_reasons')
+                .select('id, reason_text, source, submitted_at, shift_date:reason_date, staff:staff(id, name, staff_code)')
+                .eq('reason_date', today)
+                .order('submitted_at', { ascending: false })
+                .limit(50),
+        ]);
+
+        setNotifications((notifData || []) as LateAttendanceNotification[]);
+        setReasons((reasonData || []) as LateAttendanceReason[]);
+        setLoading(false);
+    }, []);
+
+    useEffect(() => {
+        fetchLateAttendanceData();
+    }, [fetchLateAttendanceData]);
+
+    const badgeStyle = (status: string) => {
+        if (status === 'sent') return { color: '#22c55e', background: 'rgba(34,197,94,0.12)' };
+        if (status === 'failed') return { color: '#ef4444', background: 'rgba(239,68,68,0.12)' };
+        return { color: '#f59e0b', background: 'rgba(245,158,11,0.12)' };
+    };
+
+    return (
+        <div style={{ background: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: 16, padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <h3 style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: 0 }}>📲 Late Attendance Follow-up</h3>
+                <button onClick={fetchLateAttendanceData} className="btn-secondary" style={{ width: 'auto', padding: '8px 14px', fontSize: 12 }}>
+                    Refresh
+                </button>
+            </div>
+
+            {loading ? (
+                <p style={{ color: '#666', fontSize: 13 }}>Loading late attendance data...</p>
+            ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <div style={{ background: '#111', border: '1px solid #222', borderRadius: 12, padding: 12 }}>
+                        <h4 style={{ color: '#ddd', fontSize: 13, margin: '0 0 10px' }}>SMS Notifications (Today)</h4>
+                        {notifications.length === 0 ? (
+                            <p style={{ color: '#555', fontSize: 12, margin: 0 }}>No late SMS records yet.</p>
+                        ) : notifications.map(item => {
+                            const style = badgeStyle(item.status);
+                            return (
+                                <div key={item.id} style={{ borderBottom: '1px solid #1f1f1f', padding: '8px 0' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                                        <div style={{ color: '#ccc', fontSize: 12 }}>
+                                            {item.staff?.name || 'Unknown'} ({item.staff?.staff_code || 'N/A'})
+                                        </div>
+                                        <span style={{ fontSize: 11, borderRadius: 999, padding: '3px 8px', ...style }}>{item.status}</span>
+                                    </div>
+                                    <div style={{ color: '#666', fontSize: 11, marginTop: 3 }}>
+                                        {item.sent_at ? `Sent ${new Date(item.sent_at).toLocaleTimeString()}` : 'Pending send'}
+                                        {item.error_message ? ` · ${item.error_message}` : ''}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+
+                    <div style={{ background: '#111', border: '1px solid #222', borderRadius: 12, padding: 12 }}>
+                        <h4 style={{ color: '#ddd', fontSize: 13, margin: '0 0 10px' }}>Late Reasons Submitted (Today)</h4>
+                        {reasons.length === 0 ? (
+                            <p style={{ color: '#555', fontSize: 12, margin: 0 }}>No reasons submitted today.</p>
+                        ) : reasons.map(item => (
+                            <div key={item.id} style={{ borderBottom: '1px solid #1f1f1f', padding: '8px 0' }}>
+                                <div style={{ color: '#ccc', fontSize: 12 }}>
+                                    {item.staff?.name || 'Unknown'} ({item.staff?.staff_code || 'N/A'})
+                                </div>
+                                <div style={{ color: '#888', fontSize: 11, marginTop: 3 }}>
+                                    {new Date(item.submitted_at).toLocaleTimeString()} · {item.source}
+                                </div>
+                                <div style={{ color: '#bbb', fontSize: 12, marginTop: 4, whiteSpace: 'pre-wrap' }}>{item.reason_text}</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+
 interface ShiftDefinition {
     id: string;
     name: string;
@@ -2626,9 +2899,17 @@ interface ShiftAssignment {
     staff?: { id: string; name: string; staff_code: string };
 }
 
+interface ShiftTemplateDay {
+    id: string;
+    shift_definition_id: string;
+    day_of_week: number;
+    active: boolean;
+}
+
 function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     const [shiftDefs, setShiftDefs] = useState<ShiftDefinition[]>([]);
     const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
+    const [templateDays, setTemplateDays] = useState<ShiftTemplateDay[]>([]);
     const [showForm, setShowForm] = useState(false);
     const [editingShift, setEditingShift] = useState<ShiftDefinition | null>(null);
     const [form, setForm] = useState({
@@ -2767,6 +3048,52 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     }, [shiftDefs, selectedShiftId]);
 
     const selectedShift = shiftDefs.find(s => s.id === selectedShiftId);
+    const selectedTemplateDays = templateDays
+        .filter(td => td.shift_definition_id === selectedShiftId && td.active)
+        .map(td => td.day_of_week);
+
+    const fetchTemplateDays = useCallback(async () => {
+        const { data } = await supabase.from('shift_template_days').select('*');
+        if (data) setTemplateDays(data);
+    }, []);
+
+    useEffect(() => { fetchTemplateDays(); }, [fetchTemplateDays]);
+
+    async function toggleTemplateDay(dayOfWeek: number) {
+        if (!selectedShiftId) return;
+        const existing = templateDays.find(td => td.shift_definition_id === selectedShiftId && td.day_of_week === dayOfWeek);
+        if (existing) {
+            await supabase.from('shift_template_days').delete().eq('id', existing.id);
+        } else {
+            await supabase.from('shift_template_days').insert({
+                shift_definition_id: selectedShiftId,
+                day_of_week: dayOfWeek,
+                active: true,
+            });
+        }
+        fetchTemplateDays();
+    }
+
+    async function applyTemplateDaysToWeek() {
+        if (!selectedShiftId || selectedTemplateDays.length === 0 || activeStaff.length === 0) return;
+        const inserts: Array<{ shift_definition_id: string; staff_id: string; shift_date: string }> = [];
+        for (const staff of activeStaff) {
+            for (const date of weekDates) {
+                const dayOfWeek = new Date(`${date}T12:00:00Z`).getUTCDay();
+                if (selectedTemplateDays.includes(dayOfWeek)) {
+                    inserts.push({
+                        shift_definition_id: selectedShiftId,
+                        staff_id: staff.id,
+                        shift_date: date,
+                    });
+                }
+            }
+        }
+        if (inserts.length > 0) {
+            await supabase.from('shift_assignments').upsert(inserts, { onConflict: 'shift_definition_id,staff_id,shift_date' });
+            fetchAssignments();
+        }
+    }
 
     return (
         <div className="animate-fadeIn">
@@ -2823,6 +3150,42 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             <button onClick={() => setWeekOffset(weekOffset - 1)} style={{ background: '#222', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', color: '#ccc', cursor: 'pointer', fontSize: 13 }}>← Prev</button>
                             <button onClick={() => setWeekOffset(0)} style={{ background: weekOffset === 0 ? 'rgba(240,180,39,0.15)' : '#222', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', color: weekOffset === 0 ? '#f0b427' : '#ccc', cursor: 'pointer', fontSize: 13, fontWeight: weekOffset === 0 ? 700 : 400 }}>This Week</button>
                             <button onClick={() => setWeekOffset(weekOffset + 1)} style={{ background: '#222', border: '1px solid #333', borderRadius: 8, padding: '6px 12px', color: '#ccc', cursor: 'pointer', fontSize: 13 }}>Next →</button>
+                        </div>
+                    </div>
+
+                    <div style={{ background: '#111', border: '1px solid #2a2a2a', borderRadius: 10, padding: '10px 12px', marginBottom: 14 }}>
+                        <div style={{ color: '#888', fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase' as const, marginBottom: 8 }}>
+                            Default Day Template (for quick weekly setup)
+                        </div>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {dayNames.map((name, i) => {
+                                const dayOfWeek = i === 6 ? 0 : i + 1;
+                                const isActive = selectedTemplateDays.includes(dayOfWeek);
+                                return (
+                                    <button
+                                        key={name}
+                                        onClick={() => toggleTemplateDay(dayOfWeek)}
+                                        style={{
+                                            padding: '6px 10px',
+                                            borderRadius: 8,
+                                            border: `1px solid ${isActive ? selectedShift.color : '#333'}`,
+                                            background: isActive ? `${selectedShift.color}33` : '#171717',
+                                            color: isActive ? '#fff' : '#888',
+                                            fontSize: 12,
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        {name}
+                                    </button>
+                                );
+                            })}
+                            <button
+                                onClick={applyTemplateDaysToWeek}
+                                className="btn-secondary"
+                                style={{ marginLeft: 'auto', padding: '6px 12px', fontSize: 12 }}
+                            >
+                                Apply Template to Week
+                            </button>
                         </div>
                     </div>
 
@@ -3114,12 +3477,15 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
     async function savePolicy(e: React.FormEvent) {
         e.preventDefault();
         setSaving(true);
+        const maxBreaks = Math.min(2, Math.max(1, form.max_breaks));
+        const maxBreakDuration = Math.min(30, Math.max(5, form.max_break_duration_minutes));
+        const maxTotalBreak = Math.min(60, Math.max(maxBreakDuration, form.max_total_break_minutes));
         const payload = {
             name: form.name,
             shift_definition_id: form.shift_definition_id || null,
-            max_breaks: form.max_breaks,
-            max_break_duration_minutes: form.max_break_duration_minutes,
-            max_total_break_minutes: form.max_total_break_minutes,
+            max_breaks: maxBreaks,
+            max_break_duration_minutes: maxBreakDuration,
+            max_total_break_minutes: maxTotalBreak,
             min_work_before_break_minutes: form.min_work_before_break_minutes,
             requires_geofence: form.requires_geofence,
         };
@@ -3194,21 +3560,24 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                                 <div>
                                     <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Breaks</label>
-                                    <input className="input-field" type="number" min={1} max={10} value={form.max_breaks} onChange={e => setForm({ ...form, max_breaks: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                    <input className="input-field" type="number" min={1} max={2} value={form.max_breaks} onChange={e => setForm({ ...form, max_breaks: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
                                 </div>
                                 <div>
                                     <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Duration (min)</label>
-                                    <input className="input-field" type="number" min={5} max={120} value={form.max_break_duration_minutes} onChange={e => setForm({ ...form, max_break_duration_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                    <input className="input-field" type="number" min={5} max={30} value={form.max_break_duration_minutes} onChange={e => setForm({ ...form, max_break_duration_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
                                 </div>
                                 <div>
                                     <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Total Break (min)</label>
-                                    <input className="input-field" type="number" min={5} max={240} value={form.max_total_break_minutes} onChange={e => setForm({ ...form, max_total_break_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
+                                    <input className="input-field" type="number" min={5} max={60} value={form.max_total_break_minutes} onChange={e => setForm({ ...form, max_total_break_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
                                 </div>
                                 <div>
                                     <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Min Work Before Break (min)</label>
                                     <input className="input-field" type="number" min={0} max={480} value={form.min_work_before_break_minutes} onChange={e => setForm({ ...form, min_work_before_break_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
                                 </div>
                             </div>
+                            <p style={{ fontSize: 11, color: '#666', margin: '0 0 10px' }}>
+                                Team agreement is enforced server-side: maximum 2 breaks, 30 minutes each, 60 minutes total.
+                            </p>
 
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16 }}>
                                 <input type="checkbox" checked={form.requires_geofence} onChange={e => setForm({ ...form, requires_geofence: e.target.checked })} style={{ accentColor: '#f0b427' }} />

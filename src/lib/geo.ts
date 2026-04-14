@@ -3,8 +3,26 @@ export interface GeoPosition {
     lng: number;
 }
 
+/** When both NEXT_PUBLIC_MOCK_GPS_LAT and NEXT_PUBLIC_MOCK_GPS_LNG are set, skip the browser geolocation API (local testing). */
+function readMockGpsFromEnv(): GeoPosition | null {
+    const latStr = process.env.NEXT_PUBLIC_MOCK_GPS_LAT;
+    const lngStr = process.env.NEXT_PUBLIC_MOCK_GPS_LNG;
+    if (!latStr?.trim() || !lngStr?.trim()) return null;
+    const lat = Number(latStr);
+    const lng = Number(lngStr);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    return { lat, lng };
+}
+
 export function getCurrentPosition(): Promise<GeoPosition> {
     return new Promise((resolve, reject) => {
+        const mock = readMockGpsFromEnv();
+        if (mock) {
+            resolve(mock);
+            return;
+        }
+
         if (!navigator.geolocation) {
             reject(new Error('Geolocation is not supported by your browser.'));
             return;

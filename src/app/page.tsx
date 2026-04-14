@@ -17,6 +17,23 @@ interface ClockResult {
   total_hours?: number;
 }
 
+async function parseEdgeResponse(res: Response): Promise<{ payload: Record<string, unknown>; message?: string }> {
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    try {
+      return { payload: (await res.json()) as Record<string, unknown> };
+    } catch {
+      return { payload: {}, message: 'Invalid server response.' };
+    }
+  }
+  try {
+    const text = await res.text();
+    return { payload: {}, message: text.trim() || 'Empty server response.' };
+  } catch {
+    return { payload: {}, message: 'Could not read server response.' };
+  }
+}
+
 export default function HomePage() {
   const [appState, setAppState] = useState<AppState>('needs_permission');
   const [geoError, setGeoError] = useState<string>('');
@@ -102,15 +119,15 @@ export default function HomePage() {
         }),
       });
 
-      const data = await res.json();
+      const { payload, message } = await parseEdgeResponse(res);
 
       if (!res.ok) {
-        setError(data.error || 'Something went wrong.');
+        setError((payload.error as string) || message || 'Something went wrong.');
         setAppState('ready');
         return;
       }
 
-      setResult(data);
+      setResult(payload as unknown as ClockResult);
       setAppState('success');
     } catch {
       setError(t(lang, 'networkError'));

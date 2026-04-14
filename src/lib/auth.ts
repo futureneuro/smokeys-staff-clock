@@ -22,6 +22,26 @@ export interface LoginResult {
   session?: StaffSession;
 }
 
+async function parseFunctionResponse(res: Response): Promise<{ payload: Record<string, unknown>; message?: string }> {
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    try {
+      const payload = (await res.json()) as Record<string, unknown>;
+      return { payload };
+    } catch {
+      return { payload: {}, message: 'Invalid JSON response from server.' };
+    }
+  }
+
+  try {
+    const text = await res.text();
+    if (!text.trim()) return { payload: {}, message: 'Empty response from server.' };
+    return { payload: {}, message: text.trim() };
+  } catch {
+    return { payload: {}, message: 'Could not read server response.' };
+  }
+}
+
 /**
  * Login with Staff ID + PIN. Returns session on success.
  */
@@ -33,22 +53,26 @@ export async function login(staffCode: string, pin: string): Promise<LoginResult
       body: JSON.stringify({ staff_code: staffCode.trim().toUpperCase(), pin: pin.trim() }),
     });
 
-    const data = await res.json();
+    const { payload, message } = await parseFunctionResponse(res);
 
     if (!res.ok) {
       return {
         success: false,
-        error: data.error || 'Login failed.',
-        locked: data.locked,
-        lockout_minutes: data.lockout_minutes,
+        error: (payload.error as string) || message || 'Login failed.',
+        locked: payload.locked as boolean | undefined,
+        lockout_minutes: payload.lockout_minutes as number | undefined,
       };
     }
 
     const session: StaffSession = {
-      token: data.token,
-      staff: data.staff,
+      token: payload.token as string,
+      staff: payload.staff as StaffSession['staff'],
       loginAt: Date.now(),
     };
+
+    if (!session.token || !session.staff?.id) {
+      return { success: false, error: 'Login response is missing session data.' };
+    }
 
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
     return { success: true, session };
@@ -123,13 +147,13 @@ export async function clockAction(
       body: JSON.stringify({ action, gps_lat: gpsLat, gps_lng: gpsLng }),
     });
 
-    const data = await res.json();
+    const { payload, message } = await parseFunctionResponse(res);
 
     if (!res.ok) {
-      return { success: false, error: data.error || 'Action failed.' };
+      return { success: false, error: (payload.error as string) || message || 'Action failed.' };
     }
 
-    return { success: true, data };
+    return { success: true, data: payload };
   } catch {
     return { success: false, error: 'Network error.' };
   }
