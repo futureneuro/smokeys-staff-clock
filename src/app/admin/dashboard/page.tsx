@@ -2982,6 +2982,7 @@ interface ShiftAssignment {
     shift_definition_id: string;
     staff_id: string;
     shift_date: string;
+    break_minutes_allowed: number;
     shift_definition?: ShiftDefinition;
     staff?: { id: string; name: string; staff_code: string };
 }
@@ -3090,8 +3091,15 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         } else {
             await supabase.from('shift_assignments').insert({
                 shift_definition_id: shiftDefId, staff_id: staffId, shift_date: date,
+                break_minutes_allowed: 60,
             });
         }
+        fetchAssignments();
+    }
+
+    async function updateAssignmentBreakMinutes(assignmentId: string, breakMinutesAllowed: number) {
+        const minutes = Number.isFinite(breakMinutesAllowed) ? Math.max(0, Math.floor(breakMinutesAllowed)) : 0;
+        await supabase.from('shift_assignments').update({ break_minutes_allowed: minutes }).eq('id', assignmentId);
         fetchAssignments();
     }
 
@@ -3101,10 +3109,11 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             d.setDate(d.getDate() + 7 + i);
             return d.toISOString().slice(0, 10);
         });
-        const inserts = assignments.map((a, idx) => ({
+        const inserts = assignments.map(a => ({
             shift_definition_id: a.shift_definition_id,
             staff_id: a.staff_id,
             shift_date: nextWeekDates[weekDates.indexOf(a.shift_date)] || nextWeekDates[new Date(a.shift_date).getDay() === 0 ? 6 : new Date(a.shift_date).getDay() - 1],
+            break_minutes_allowed: a.break_minutes_allowed ?? 60,
         })).filter(ins => ins.shift_date);
         if (inserts.length > 0) {
             await supabase.from('shift_assignments').upsert(inserts, { onConflict: 'shift_definition_id,staff_id,shift_date' });
@@ -3112,10 +3121,10 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         }
     }
 
-    function isAssigned(shiftDefId: string, staffId: string, date: string) {
-        return assignments.some(
+    function getAssignment(shiftDefId: string, staffId: string, date: string) {
+        return assignments.find(
             a => a.shift_definition_id === shiftDefId && a.staff_id === staffId && a.shift_date === date
-        );
+        ) || null;
     }
 
     function getAssignedStaff(shiftDefId: string, date: string) {
@@ -3163,7 +3172,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
 
     async function applyTemplateDaysToWeek() {
         if (!selectedShiftId || selectedTemplateDays.length === 0 || activeStaff.length === 0) return;
-        const inserts: Array<{ shift_definition_id: string; staff_id: string; shift_date: string }> = [];
+        const inserts: Array<{ shift_definition_id: string; staff_id: string; shift_date: string; break_minutes_allowed: number }> = [];
         for (const staff of activeStaff) {
             for (const date of weekDates) {
                 const dayOfWeek = new Date(`${date}T12:00:00Z`).getUTCDay();
@@ -3172,6 +3181,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                         shift_definition_id: selectedShiftId,
                         staff_id: staff.id,
                         shift_date: date,
+                        break_minutes_allowed: 60,
                     });
                 }
             }
@@ -3300,25 +3310,49 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                             {staff.name}
                                         </td>
                                         {weekDates.map(date => {
-                                            const assigned = isAssigned(selectedShift.id, staff.id, date);
+                                            const assignment = getAssignment(selectedShift.id, staff.id, date);
+                                            const assigned = !!assignment;
                                             const isToday = date === todayStr;
                                             return (
                                                 <td key={date} style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #1f1f1f', background: isToday ? 'rgba(240,180,39,0.03)' : 'transparent' }}>
-                                                    <button
-                                                        onClick={() => toggleAssignment(selectedShift.id, staff.id, date)}
-                                                        style={{
-                                                            width: 36, height: 36, borderRadius: 10,
-                                                            border: assigned ? 'none' : '2px dashed #333',
-                                                            background: assigned ? selectedShift.color : 'transparent',
-                                                            cursor: 'pointer', fontSize: 14,
-                                                            transition: 'all 0.15s', opacity: assigned ? 1 : 0.5,
-                                                            color: assigned ? '#000' : '#555',
-                                                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                                                        }}
-                                                        title={assigned ? 'Click to remove' : 'Click to assign'}
-                                                    >
-                                                        {assigned ? '✓' : '+'}
-                                                    </button>
+                                                    <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                                                        <button
+                                                            onClick={() => toggleAssignment(selectedShift.id, staff.id, date)}
+                                                            style={{
+                                                                width: 36, height: 36, borderRadius: 10,
+                                                                border: assigned ? 'none' : '2px dashed #333',
+                                                                background: assigned ? selectedShift.color : 'transparent',
+                                                                cursor: 'pointer', fontSize: 14,
+                                                                transition: 'all 0.15s', opacity: assigned ? 1 : 0.5,
+                                                                color: assigned ? '#000' : '#555',
+                                                                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                                            }}
+                                                            title={assigned ? 'Click to remove' : 'Click to assign'}
+                                                        >
+                                                            {assigned ? '✓' : '+'}
+                                                        </button>
+                                                        {assignment && (
+                                                            <input
+                                                                type="number"
+                                                                min={0}
+                                                                step={1}
+                                                                defaultValue={assignment.break_minutes_allowed ?? 60}
+                                                                onClick={e => e.stopPropagation()}
+                                                                onBlur={e => updateAssignmentBreakMinutes(assignment.id, Number(e.target.value))}
+                                                                style={{
+                                                                    width: 52,
+                                                                    padding: '4px 6px',
+                                                                    borderRadius: 6,
+                                                                    border: '1px solid #333',
+                                                                    background: '#121212',
+                                                                    color: '#bbb',
+                                                                    fontSize: 11,
+                                                                    textAlign: 'center',
+                                                                }}
+                                                                title="Break minutes allowed"
+                                                            />
+                                                        )}
+                                                    </div>
                                                 </td>
                                             );
                                         })}
@@ -3365,9 +3399,19 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                                         <span style={{ width: 6, height: 6, borderRadius: '50%', background: sd.color }} />
                                                         <span style={{ fontSize: 10, color: '#999', fontWeight: 600 }}>{sd.name}</span>
                                                     </div>
-                                                    {assigned.map(s => (
-                                                        <div key={s.id} style={{ fontSize: 10, color: '#666', paddingLeft: 10 }}>{s.name}</div>
-                                                    ))}
+                                                    {assigned.map(s => {
+                                                        const assignment = getAssignment(sd.id, s.id, date);
+                                                        return (
+                                                            <div key={s.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 10 }}>
+                                                                <div style={{ fontSize: 10, color: '#666' }}>{s.name}</div>
+                                                                {assignment && assignment.break_minutes_allowed !== undefined && (
+                                                                    <div style={{ fontSize: 9, background: '#333', color: '#aaa', padding: '2px 4px', borderRadius: 4, marginLeft: 4 }}>
+                                                                        {assignment.break_minutes_allowed}m break
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
                                                 </div>
                                             );
                                         })}

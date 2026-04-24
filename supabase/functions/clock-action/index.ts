@@ -189,7 +189,7 @@ Deno.serve(async req => {
     return jsonResponse({
       action: 'break_start',
       staff_name: staff.name,
-      message: 'Break started. 30:00 remaining.',
+      message: 'Break started.',
       break_start_time: nowIso,
     });
   }

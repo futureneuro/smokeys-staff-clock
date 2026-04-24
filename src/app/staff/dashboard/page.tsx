@@ -24,6 +24,7 @@ interface Shift {
     early_checkin_minutes: number;
     late_grace_minutes: number;
     block_outside_window: boolean;
+    break_minutes_allowed: number;
 }
 
 interface Task {
@@ -59,7 +60,6 @@ type LocationCheckResult =
     | { ok: false; status: 'error' | 'too_far'; message: string };
 
 export default function StaffDashboard() {
-    const BREAK_DURATION_SECONDS = 60 * 60;
     const router = useRouter();
     const [session, setSession] = useState<StaffSession | null>(null);
     const [loading, setLoading] = useState(true);
@@ -120,6 +120,7 @@ export default function StaffDashboard() {
     const [lateReasonSaved, setLateReasonSaved] = useState(false);
     const [lateReasonSubmitting, setLateReasonSubmitting] = useState(false);
     const [lateReasonError, setLateReasonError] = useState('');
+    const breakDurationSeconds = Math.max(0, (todayShift?.break_minutes_allowed ?? 60) * 60);
 
     useEffect(() => {
         const saved = localStorage.getItem('smokeys_lang') as Lang | null;
@@ -187,14 +188,14 @@ export default function StaffDashboard() {
         // Today's shift (from shift_assignments + shift_definitions)
         const { data: shiftAssignments } = await supabase
             .from('shift_assignments')
-            .select('id, shift_date, shift_definition:shift_definitions(id, name, start_time, end_time, color, early_checkin_minutes, late_grace_minutes, block_outside_window)')
+            .select('id, shift_date, break_minutes_allowed, shift_definition:shift_definitions(id, name, start_time, end_time, color, early_checkin_minutes, late_grace_minutes, block_outside_window)')
             .eq('staff_id', session.staff.id)
             .eq('shift_date', today)
             .limit(1);
         if (shiftAssignments && shiftAssignments.length > 0) {
             const sa = shiftAssignments[0] as any;
             const sd = sa.shift_definition;
-            setTodayShift(sd ? { id: sa.id, shift_date: sa.shift_date, start_time: sd.start_time, end_time: sd.end_time, name: sd.name, color: sd.color, early_checkin_minutes: sd.early_checkin_minutes ?? 15, late_grace_minutes: sd.late_grace_minutes ?? 10, block_outside_window: sd.block_outside_window ?? false } : null);
+            setTodayShift(sd ? { id: sa.id, shift_date: sa.shift_date, start_time: sd.start_time, end_time: sd.end_time, name: sd.name, color: sd.color, early_checkin_minutes: sd.early_checkin_minutes ?? 15, late_grace_minutes: sd.late_grace_minutes ?? 10, block_outside_window: sd.block_outside_window ?? false, break_minutes_allowed: sa.break_minutes_allowed ?? 60 } : null);
         } else {
             setTodayShift(null);
         }
@@ -336,27 +337,27 @@ export default function StaffDashboard() {
     // Live break timer
     useEffect(() => {
         if (!activeBreak) {
-            setBreakTimer(Math.max(0, BREAK_DURATION_SECONDS - pastBreaksSeconds));
+            setBreakTimer(Math.max(0, breakDurationSeconds - pastBreaksSeconds));
             autoEndingBreakRef.current = false;
             return;
         }
         const updateTimer = () => {
             const elapsed = Math.floor((Date.now() - new Date(activeBreak.break_start).getTime()) / 1000);
-            const remaining = Math.max(0, BREAK_DURATION_SECONDS - (pastBreaksSeconds + elapsed));
+            const remaining = Math.max(0, breakDurationSeconds - (pastBreaksSeconds + elapsed));
             setBreakTimer(remaining);
         };
         // Update immediately so first render is not 0:00
         updateTimer();
         const tick = setInterval(updateTimer, 1000);
         return () => clearInterval(tick);
-    }, [activeBreak, pastBreaksSeconds, BREAK_DURATION_SECONDS]);
+    }, [activeBreak, pastBreaksSeconds, breakDurationSeconds]);
 
     // Auto-end break at 00:00
     useEffect(() => {
         if (!activeBreak || autoEndingBreakRef.current) return;
         const elapsed = Math.floor((Date.now() - new Date(activeBreak.break_start).getTime()) / 1000);
         const totalUsed = pastBreaksSeconds + elapsed;
-        if (totalUsed < BREAK_DURATION_SECONDS) return;
+        if (totalUsed < breakDurationSeconds) return;
         autoEndingBreakRef.current = true;
         let cancelled = false;
 
@@ -391,7 +392,7 @@ export default function StaffDashboard() {
         return () => {
             cancelled = true;
         };
-    }, [activeBreak, BREAK_DURATION_SECONDS, position, openLog, fetchBreakData]);
+    }, [activeBreak, breakDurationSeconds, position, openLog, fetchBreakData]);
 
     const fetchAllTasks = useCallback(async () => {
         if (!session) return;
@@ -489,6 +490,12 @@ export default function StaffDashboard() {
         setBreakLoading(true);
         setBreakError('');
         setBreakSuccess('');
+
+        if (action === 'break_start' && breakDurationSeconds <= 0) {
+            setBreakError('No break allowed for this shift.');
+            setBreakLoading(false);
+            return;
+        }
 
         const location = await ensureValidLocation();
         if (!location.ok) {
@@ -914,7 +921,7 @@ export default function StaffDashboard() {
                             )}
                         </div>
 
-                        {(!activeBreak && breakTimer < 3600 && breakTimer > 0) && (
+                        {(!activeBreak && breakTimer < breakDurationSeconds && breakTimer > 0) && (
                             <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 12, padding: '12px 16px', marginBottom: 12, textAlign: 'center' }}>
                                 <div style={{ color: '#f59e0b', fontSize: 28, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
                                     {`${Math.floor(breakTimer / 60)}:${(breakTimer % 60).toString().padStart(2, '0')}`}
@@ -936,21 +943,24 @@ export default function StaffDashboard() {
 
                         {breakError && <p style={{ color: '#ef4444', fontSize: 13, marginBottom: 8, textAlign: 'center' }}>{breakError}</p>}
                         {breakSuccess && <p style={{ color: '#22c55e', fontSize: 13, marginBottom: 8, textAlign: 'center' }}>{breakSuccess}</p>}
+                        {!activeBreak && breakDurationSeconds === 0 && (
+                            <p style={{ color: '#f59e0b', fontSize: 13, marginBottom: 8, textAlign: 'center' }}>No break assigned for this shift.</p>
+                        )}
 
                         {activeBreak ? (
                             <button
                                 onClick={() => handleBreak('break_end')}
-                                disabled={breakLoading || (breakTimer > 0 && breakTimer <= 300)}
+                                disabled={breakLoading}
                                 style={{
                                     width: '100%', padding: '14px', borderRadius: 14,
-                                    background: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 'rgba(245,158,11,0.15)' : 'rgba(245,158,11,0.1)',
+                                    background: breakLoading ? 'rgba(245,158,11,0.15)' : 'rgba(245,158,11,0.1)',
                                     border: '2px solid #f59e0b',
                                     color: '#f59e0b',
-                                    fontSize: 15, fontWeight: 700, cursor: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 'not-allowed' : 'pointer',
-                                    transition: 'all 0.2s', opacity: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 0.6 : 1,
+                                    fontSize: 15, fontWeight: 700, cursor: breakLoading ? 'not-allowed' : 'pointer',
+                                    transition: 'all 0.2s', opacity: breakLoading ? 0.6 : 1,
                                 }}
                             >
-                                {breakLoading ? '...' : (breakTimer > 0 && breakTimer <= 300) ? '⏳ Must finish break (Under 5m)' : '⏹ Stop Break'}
+                                {breakLoading ? '...' : '⏹ Stop Break'}
                             </button>
                         ) : geoStatus === 'ok' ? (
                             <button
@@ -965,7 +975,7 @@ export default function StaffDashboard() {
                                     transition: 'all 0.2s', opacity: (breakLoading || breakTimer <= 0) ? 0.6 : 1,
                                 }}
                             >
-                                {breakLoading ? '...' : breakTimer <= 0 ? 'No Break Time Left' : '▶ Start Break'}
+                                {breakLoading ? '...' : breakDurationSeconds === 0 ? 'No Break Allowed' : breakTimer <= 0 ? 'No Break Time Left' : '▶ Start Break'}
                             </button>
                         ) : (
                             <p style={{ color: '#555', fontSize: 12, textAlign: 'center' }}>Location required to start break.</p>
