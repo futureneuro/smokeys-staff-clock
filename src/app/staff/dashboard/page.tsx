@@ -59,7 +59,7 @@ type LocationCheckResult =
     | { ok: false; status: 'error' | 'too_far'; message: string };
 
 export default function StaffDashboard() {
-    const BREAK_DURATION_SECONDS = 30 * 60;
+    const BREAK_DURATION_SECONDS = 60 * 60;
     const router = useRouter();
     const [session, setSession] = useState<StaffSession | null>(null);
     const [loading, setLoading] = useState(true);
@@ -109,6 +109,7 @@ export default function StaffDashboard() {
     const [activeBreak, setActiveBreak] = useState<{ id: string; break_start: string } | null>(null);
     const [breakCount, setBreakCount] = useState(0);
     const [breakTimer, setBreakTimer] = useState(0); // seconds
+    const [pastBreaksSeconds, setPastBreaksSeconds] = useState(0);
     const [breakLoading, setBreakLoading] = useState(false);
     const [breakError, setBreakError] = useState('');
     const [breakSuccess, setBreakSuccess] = useState('');
@@ -306,12 +307,24 @@ export default function StaffDashboard() {
             .is('break_end', null)
             .limit(1);
         setActiveBreak(active && active.length > 0 ? active[0] : null);
-        // Break count (all breaks for this log, including completed)
-        const { count } = await supabase
+        // Break duration and count
+        const { data: allBreaks } = await supabase
             .from('breaks')
-            .select('id', { count: 'exact', head: true })
+            .select('id, break_start, break_end')
             .eq('time_log_id', timeLogId);
-        setBreakCount(count || 0);
+        let usedSecs = 0;
+        let count = 0;
+        if (allBreaks) {
+            count = allBreaks.length;
+            allBreaks.forEach(b => {
+                if (b.break_end) {
+                    const diff = Math.max(0, Math.floor((new Date(b.break_end).getTime() - new Date(b.break_start).getTime()) / 1000));
+                    usedSecs += diff;
+                }
+            });
+        }
+        setPastBreaksSeconds(usedSecs);
+        setBreakCount(count);
     }, []);
 
     // When open log changes, fetch break state
@@ -323,26 +336,27 @@ export default function StaffDashboard() {
     // Live break timer
     useEffect(() => {
         if (!activeBreak) {
-            setBreakTimer(0);
+            setBreakTimer(Math.max(0, BREAK_DURATION_SECONDS - pastBreaksSeconds));
             autoEndingBreakRef.current = false;
             return;
         }
         const updateTimer = () => {
             const elapsed = Math.floor((Date.now() - new Date(activeBreak.break_start).getTime()) / 1000);
-            const remaining = Math.max(0, BREAK_DURATION_SECONDS - elapsed);
+            const remaining = Math.max(0, BREAK_DURATION_SECONDS - (pastBreaksSeconds + elapsed));
             setBreakTimer(remaining);
         };
         // Update immediately so first render is not 0:00
         updateTimer();
         const tick = setInterval(updateTimer, 1000);
         return () => clearInterval(tick);
-    }, [activeBreak, BREAK_DURATION_SECONDS]);
+    }, [activeBreak, pastBreaksSeconds, BREAK_DURATION_SECONDS]);
 
-    // Auto-end break at 00:00 so staff do not need to tap "End Break"
+    // Auto-end break at 00:00
     useEffect(() => {
         if (!activeBreak || autoEndingBreakRef.current) return;
         const elapsed = Math.floor((Date.now() - new Date(activeBreak.break_start).getTime()) / 1000);
-        if (elapsed < BREAK_DURATION_SECONDS) return;
+        const totalUsed = pastBreaksSeconds + elapsed;
+        if (totalUsed < BREAK_DURATION_SECONDS) return;
         autoEndingBreakRef.current = true;
         let cancelled = false;
 
@@ -362,7 +376,7 @@ export default function StaffDashboard() {
             if (cancelled) return;
 
             if (result.success) {
-                setBreakSuccess('Break auto-ended after 30 minutes.');
+                setBreakSuccess('Break auto-ended.');
                 if (openLog) fetchBreakData(openLog.id);
                 setTimeout(() => setBreakSuccess(''), 5000);
             } else {
@@ -485,7 +499,7 @@ export default function StaffDashboard() {
 
         const result = await clockAction(action, location.position.lat, location.position.lng);
         if (result.success) {
-            setBreakSuccess(action === 'break_start' ? 'Break started. 30:00 remaining.' : 'Break ended.');
+            setBreakSuccess(action === 'break_start' ? 'Break started.' : 'Break ended.');
             if (openLog) fetchBreakData(openLog.id);
             setTimeout(() => setBreakSuccess(''), 5000);
         } else {
@@ -900,6 +914,15 @@ export default function StaffDashboard() {
                             )}
                         </div>
 
+                        {(!activeBreak && breakTimer < 3600 && breakTimer > 0) && (
+                            <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 12, padding: '12px 16px', marginBottom: 12, textAlign: 'center' }}>
+                                <div style={{ color: '#f59e0b', fontSize: 28, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                                    {`${Math.floor(breakTimer / 60)}:${(breakTimer % 60).toString().padStart(2, '0')}`}
+                                </div>
+                                <div style={{ color: '#888', fontSize: 12, marginTop: 2 }}>Break time remaining</div>
+                            </div>
+                        )}
+
                         {activeBreak && (
                             <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 12, padding: '12px 16px', marginBottom: 12, textAlign: 'center' }}>
                                 <div style={{ color: '#f59e0b', fontSize: 28, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
@@ -916,32 +939,33 @@ export default function StaffDashboard() {
 
                         {activeBreak ? (
                             <button
-                                disabled
+                                onClick={() => handleBreak('break_end')}
+                                disabled={breakLoading || (breakTimer > 0 && breakTimer <= 300)}
                                 style={{
                                     width: '100%', padding: '14px', borderRadius: 14,
-                                    background: 'rgba(245,158,11,0.15)',
+                                    background: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 'rgba(245,158,11,0.15)' : 'rgba(245,158,11,0.1)',
                                     border: '2px solid #f59e0b',
                                     color: '#f59e0b',
-                                    fontSize: 15, fontWeight: 700, cursor: 'not-allowed',
-                                    transition: 'all 0.2s', opacity: breakLoading ? 0.6 : 1,
+                                    fontSize: 15, fontWeight: 700, cursor: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 'not-allowed' : 'pointer',
+                                    transition: 'all 0.2s', opacity: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 0.6 : 1,
                                 }}
                             >
-                                {breakLoading ? '...' : '⏳ Break auto-ends at 00:00'}
+                                {breakLoading ? '...' : (breakTimer > 0 && breakTimer <= 300) ? '⏳ Must finish break (Under 5m)' : '⏹ Stop Break'}
                             </button>
                         ) : geoStatus === 'ok' ? (
                             <button
                                 onClick={() => handleBreak('break_start')}
-                                disabled={breakLoading}
+                                disabled={breakLoading || breakTimer <= 0}
                                 style={{
                                     width: '100%', padding: '14px', borderRadius: 14,
                                     background: 'rgba(34,197,94,0.1)',
                                     border: '2px solid #22c55e',
                                     color: '#22c55e',
-                                    fontSize: 15, fontWeight: 700, cursor: breakLoading ? 'not-allowed' : 'pointer',
-                                    transition: 'all 0.2s', opacity: breakLoading ? 0.6 : 1,
+                                    fontSize: 15, fontWeight: 700, cursor: (breakLoading || breakTimer <= 0) ? 'not-allowed' : 'pointer',
+                                    transition: 'all 0.2s', opacity: (breakLoading || breakTimer <= 0) ? 0.6 : 1,
                                 }}
                             >
-                                {breakLoading ? '...' : '▶ Start Break'}
+                                {breakLoading ? '...' : breakTimer <= 0 ? 'No Break Time Left' : '▶ Start Break'}
                             </button>
                         ) : (
                             <p style={{ color: '#555', fontSize: 12, textAlign: 'center' }}>Location required to start break.</p>

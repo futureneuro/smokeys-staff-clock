@@ -78,8 +78,18 @@ begin
         alter table public.break_policies
             add constraint break_policies_team_agreement_chk
                 check (
-                    max_breaks <= 2
-                    and max_break_duration_minutes <= 30
+                    max_breaks <= 99
+                    and max_break_duration_minutes <= 60
+                    and max_total_break_minutes <= 60
+                ) not valid;
+    else
+        alter table public.break_policies
+            drop constraint break_policies_team_agreement_chk;
+        alter table public.break_policies
+            add constraint break_policies_team_agreement_chk
+                check (
+                    max_breaks <= 99
+                    and max_break_duration_minutes <= 60
                     and max_total_break_minutes <= 60
                 ) not valid;
     end if;
@@ -93,8 +103,8 @@ declare
     v_staff_id uuid;
     v_shift_date date;
     v_shift_definition_id uuid;
-    v_max_breaks integer := 2;
-    v_max_break_duration integer := 30;
+    v_max_breaks integer := 99;
+    v_max_break_duration integer := 60;
     v_max_total integer := 60;
     v_existing_breaks integer := 0;
     v_total_completed integer := 0;
@@ -133,8 +143,8 @@ begin
         limit 1;
     end if;
 
-    v_max_breaks := coalesce(v_max_breaks, 2);
-    v_max_break_duration := least(coalesce(v_max_break_duration, 30), 30);
+    v_max_breaks := coalesce(v_max_breaks, 99);
+    v_max_break_duration := least(coalesce(v_max_break_duration, 60), 60);
     v_max_total := least(coalesce(v_max_total, 60), 60);
 
     select count(*)
