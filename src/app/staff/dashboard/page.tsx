@@ -113,6 +113,7 @@ export default function StaffDashboard() {
     const [breakLoading, setBreakLoading] = useState(false);
     const [breakError, setBreakError] = useState('');
     const [breakSuccess, setBreakSuccess] = useState('');
+    const [autoEndingBreak, setAutoEndingBreak] = useState(false);
     const autoEndingBreakRef = useRef(false);
     const [isLateForShift, setIsLateForShift] = useState(false);
     const [lateReasonId, setLateReasonId] = useState<string | null>(null);
@@ -366,6 +367,7 @@ export default function StaffDashboard() {
         if (!activeBreak) {
             setBreakTimer(Math.max(0, breakDurationSeconds - pastBreaksSeconds));
             autoEndingBreakRef.current = false;
+            setAutoEndingBreak(false);
             return;
         }
         const updateTimer = () => {
@@ -386,30 +388,37 @@ export default function StaffDashboard() {
         const totalUsed = pastBreaksSeconds + elapsed;
         if (totalUsed < breakDurationSeconds) return;
         autoEndingBreakRef.current = true;
+        setAutoEndingBreak(true);
         let cancelled = false;
 
         const autoEnd = async () => {
-            const pos = position;
-            if (!pos) {
-                if (!cancelled) {
-                    setBreakError('Could not auto-end break: location unavailable.');
-                    autoEndingBreakRef.current = false;
-                }
-                return;
+            let gpsLat = position?.lat ?? 0;
+            let gpsLng = position?.lng ?? 0;
+            const location = await ensureValidLocation();
+            if (location.ok) {
+                gpsLat = location.position.lat;
+                gpsLng = location.position.lng;
             }
 
             setBreakLoading(true);
             setBreakError('');
-            const result = await clockAction('break_end', pos.lat, pos.lng);
-            if (cancelled) return;
+            const result = await clockAction('break_end', gpsLat, gpsLng);
+            if (cancelled) {
+                setBreakLoading(false);
+                autoEndingBreakRef.current = false;
+                setAutoEndingBreak(false);
+                return;
+            }
 
             if (result.success) {
-                setBreakSuccess('Break auto-ended.');
+                setBreakSuccess(location.ok ? 'Break auto-ended.' : 'Break auto-ended (no live location).');
+                setAutoEndingBreak(false);
                 if (openLog) fetchBreakData(openLog.id);
                 setTimeout(() => setBreakSuccess(''), 5000);
             } else {
                 setBreakError(result.error || 'Failed to auto-end break.');
                 autoEndingBreakRef.current = false;
+                setAutoEndingBreak(false);
             }
             setBreakLoading(false);
         };
@@ -419,7 +428,7 @@ export default function StaffDashboard() {
         return () => {
             cancelled = true;
         };
-    }, [activeBreak, breakDurationSeconds, position, openLog, fetchBreakData]);
+    }, [activeBreak, breakDurationSeconds, openLog, fetchBreakData, pastBreaksSeconds]);
 
     const fetchAllTasks = useCallback(async () => {
         if (!session) return;
@@ -517,6 +526,7 @@ export default function StaffDashboard() {
         setBreakLoading(true);
         setBreakError('');
         setBreakSuccess('');
+        if (action === 'break_end') setAutoEndingBreak(false);
 
         if (action === 'break_start' && breakDurationSeconds <= 0) {
             setBreakError('No break allowed for this shift.');
@@ -524,16 +534,25 @@ export default function StaffDashboard() {
             return;
         }
 
+        let gpsLat = position?.lat ?? 0;
+        let gpsLng = position?.lng ?? 0;
         const location = await ensureValidLocation();
-        if (!location.ok) {
+        if (location.ok) {
+            gpsLat = location.position.lat;
+            gpsLng = location.position.lng;
+        } else if (action === 'break_start') {
             setBreakError(location.message);
             setBreakLoading(false);
             return;
         }
 
-        const result = await clockAction(action, location.position.lat, location.position.lng);
+        const result = await clockAction(action, gpsLat, gpsLng);
         if (result.success) {
-            setBreakSuccess(action === 'break_start' ? 'Break started.' : 'Break ended.');
+            setBreakSuccess(action === 'break_start'
+                ? 'Break started.'
+                : location.ok
+                    ? 'Break ended.'
+                    : 'Break ended without live location.');
             if (openLog) fetchBreakData(openLog.id);
             setTimeout(() => setBreakSuccess(''), 5000);
         } else {
@@ -963,7 +982,7 @@ export default function StaffDashboard() {
                                     {`${Math.floor(breakTimer / 60)}:${(breakTimer % 60).toString().padStart(2, '0')}`}
                                 </div>
                                 <div style={{ color: '#888', fontSize: 12, marginTop: 2 }}>
-                                    {breakTimer === 0 ? 'Auto-ending break...' : 'Break time remaining'}
+                                    {autoEndingBreak ? 'Auto-ending break...' : 'Break time remaining'}
                                 </div>
                             </div>
                         )}

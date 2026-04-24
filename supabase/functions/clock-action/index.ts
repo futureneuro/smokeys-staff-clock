@@ -194,36 +194,38 @@ Deno.serve(async req => {
     });
   }
 
-  const { data: activeBreak, error: activeBreakError } = await supabase
+  const { data: activeBreaks, error: activeBreakError } = await supabase
     .from('breaks')
     .select('id, break_start')
     .eq('time_log_id', openLog.log.id)
-    .is('break_end', null)
-    .limit(1);
+    .is('break_end', null);
   if (activeBreakError) return errorResponse(activeBreakError.message, 500);
-  if (!activeBreak || activeBreak.length === 0) {
+  if (!activeBreaks || activeBreaks.length === 0) {
     return errorResponse('No active break found.', 409);
   }
 
-  const breakRow = activeBreak[0];
-  const durationMinutes = Math.max(0, Math.round((Date.now() - new Date(breakRow.break_start).getTime()) / 60000));
-
-  const { error: endBreakError } = await supabase
-    .from('breaks')
-    .update({
-      break_end: nowIso,
-      duration_minutes: durationMinutes,
-    })
-    .eq('id', breakRow.id);
-  if (endBreakError) return errorResponse(endBreakError.message, 400);
+  let maxDurationMinutes = 0;
+  for (const row of activeBreaks) {
+    const durationMinutes = Math.max(0, Math.round((Date.now() - new Date(row.break_start).getTime()) / 60000));
+    maxDurationMinutes = Math.max(maxDurationMinutes, durationMinutes);
+    const { error: endBreakError } = await supabase
+      .from('breaks')
+      .update({
+        break_end: nowIso,
+        duration_minutes: durationMinutes,
+      })
+      .eq('id', row.id);
+    if (endBreakError) return errorResponse(endBreakError.message, 400);
+  }
 
   await safeUpdateAssignment(supabase, staff.id, todayBogota, { status: 'active' });
 
   return jsonResponse({
     action: 'break_end',
     staff_name: staff.name,
-    message: 'Break ended.',
+    message: activeBreaks.length > 1 ? 'Break ended. Multiple active break rows were reconciled.' : 'Break ended.',
     break_end_time: nowIso,
-    duration_minutes: durationMinutes,
+    duration_minutes: maxDurationMinutes,
+    closed_break_count: activeBreaks.length,
   });
 });
