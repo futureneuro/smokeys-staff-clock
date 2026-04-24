@@ -186,16 +186,43 @@ export default function StaffDashboard() {
         setOpenLog(currentOpenLog);
 
         // Today's shift (from shift_assignments + shift_definitions)
-        const { data: shiftAssignments } = await supabase
-            .from('shift_assignments')
-            .select('id, shift_date, break_minutes_allowed, shift_definition:shift_definitions(id, name, start_time, end_time, color, early_checkin_minutes, late_grace_minutes, block_outside_window)')
-            .eq('staff_id', session.staff.id)
-            .eq('shift_date', today)
-            .limit(1);
+        let shiftAssignments = null;
+        
+        if (currentOpenLog) {
+            const { data } = await supabase
+                .from('shift_assignments')
+                .select('id, shift_date, break_minutes_allowed, shift_definition:shift_definitions(id, name, start_time, end_time, color, early_checkin_minutes, late_grace_minutes, block_outside_window)')
+                .eq('time_log_id', currentOpenLog.id)
+                .limit(1);
+            shiftAssignments = data;
+        }
+
+        if (!shiftAssignments || shiftAssignments.length === 0) {
+            const { data } = await supabase
+                .from('shift_assignments')
+                .select('id, shift_date, break_minutes_allowed, shift_definition:shift_definitions(id, name, start_time, end_time, color, early_checkin_minutes, late_grace_minutes, block_outside_window)')
+                .eq('staff_id', session.staff.id)
+                .eq('shift_date', today)
+                .order('created_at', { ascending: false })
+                .limit(1);
+            shiftAssignments = data;
+        }
+        
         if (shiftAssignments && shiftAssignments.length > 0) {
             const sa = shiftAssignments[0] as any;
             const sd = sa.shift_definition;
-            setTodayShift(sd ? { id: sa.id, shift_date: sa.shift_date, start_time: sd.start_time, end_time: sd.end_time, name: sd.name, color: sd.color, early_checkin_minutes: sd.early_checkin_minutes ?? 15, late_grace_minutes: sd.late_grace_minutes ?? 10, block_outside_window: sd.block_outside_window ?? false, break_minutes_allowed: sa.break_minutes_allowed ?? 60 } : null);
+            setTodayShift({ 
+                id: sa.id, 
+                shift_date: sa.shift_date, 
+                start_time: sd?.start_time ?? '00:00', 
+                end_time: sd?.end_time ?? '23:59', 
+                name: sd?.name ?? 'Assigned Shift', 
+                color: sd?.color ?? '#444', 
+                early_checkin_minutes: sd?.early_checkin_minutes ?? 15, 
+                late_grace_minutes: sd?.late_grace_minutes ?? 10, 
+                block_outside_window: sd?.block_outside_window ?? false, 
+                break_minutes_allowed: sa.break_minutes_allowed ?? 60 
+            });
         } else {
             setTodayShift(null);
         }
