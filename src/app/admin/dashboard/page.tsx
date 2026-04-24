@@ -2983,6 +2983,7 @@ interface ShiftAssignment {
     staff_id: string;
     shift_date: string;
     break_minutes_allowed: number;
+    time_log_id?: string | null;
     shift_definition?: ShiftDefinition;
     staff?: { id: string; name: string; staff_code: string };
 }
@@ -2997,12 +2998,18 @@ interface ShiftTemplateDay {
 function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     const [shiftDefs, setShiftDefs] = useState<ShiftDefinition[]>([]);
     const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
+    const [formDateAssignments, setFormDateAssignments] = useState<ShiftAssignment[]>([]);
     const [templateDays, setTemplateDays] = useState<ShiftTemplateDay[]>([]);
     const [showForm, setShowForm] = useState(false);
     const [editingShift, setEditingShift] = useState<ShiftDefinition | null>(null);
+    const [editingAssignment, setEditingAssignment] = useState<ShiftAssignment | null>(null);
+    const [formError, setFormError] = useState('');
     const [form, setForm] = useState({
         name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427',
         shift_type: 'normal',
+        shift_date: new Date().toISOString().slice(0, 10),
+        staff_id: '',
+        break_minutes_allowed: 60,
         early_checkin_minutes: 15,
         late_grace_minutes: 10,
         early_checkout_minutes: 0,
@@ -3015,6 +3022,52 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     const [deleteId, setDeleteId] = useState<string | null>(null);
 
     const activeStaff = staffList.filter(s => s.active && s.role === 'staff');
+
+    function toMinutes(time: string): number {
+        const [hours, mins] = (time || '00:00').split(':').map(Number);
+        return ((Number.isFinite(hours) ? hours : 0) * 60) + (Number.isFinite(mins) ? mins : 0);
+    }
+
+    function normalizeTimeRanges(startTime: string, endTime: string): Array<{ start: number; end: number }> {
+        const start = toMinutes(startTime);
+        const end = toMinutes(endTime);
+        if (end > start) return [{ start, end }];
+        if (end < start) return [{ start, end: 24 * 60 }, { start: 0, end }];
+        return [{ start, end: 24 * 60 }];
+    }
+
+    function hasTimeOverlap(aStart: string, aEnd: string, bStart: string, bEnd: string): boolean {
+        const aRanges = normalizeTimeRanges(aStart, aEnd);
+        const bRanges = normalizeTimeRanges(bStart, bEnd);
+        return aRanges.some(a => bRanges.some(b => Math.max(a.start, b.start) < Math.min(a.end, b.end)));
+    }
+
+    function hasAssignmentConflict(
+        staffId: string,
+        date: string,
+        startTime: string,
+        endTime: string,
+        ignoreAssignmentId?: string,
+        sourceAssignments: ShiftAssignment[] = assignments
+    ): boolean {
+        return sourceAssignments.some(assignment => {
+            if (assignment.staff_id !== staffId) return false;
+            if (assignment.shift_date !== date) return false;
+            if (assignment.id === ignoreAssignmentId) return false;
+            const definition = assignment.shift_definition;
+            if (!definition) return false;
+            return hasTimeOverlap(startTime, endTime, definition.start_time, definition.end_time);
+        });
+    }
+
+    const availableStaff = activeStaff.filter(staff => !hasAssignmentConflict(
+        staff.id,
+        form.shift_date,
+        form.start_time,
+        form.end_time,
+        editingAssignment?.id,
+        formDateAssignments
+    ));
 
     // Get week dates
     const getWeekDates = useCallback(() => {
@@ -3049,9 +3102,42 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
 
     useEffect(() => { fetchShiftDefs(); }, [fetchShiftDefs]);
     useEffect(() => { fetchAssignments(); }, [fetchAssignments]);
+    useEffect(() => {
+        if (!showForm || !form.shift_date) {
+            setFormDateAssignments([]);
+            return;
+        }
+        let active = true;
+        (async () => {
+            const { data } = await supabase
+                .from('shift_assignments')
+                .select('id, shift_definition_id, staff_id, shift_date, break_minutes_allowed, shift_definition:shift_definitions(*)')
+                .eq('shift_date', form.shift_date);
+            if (!active) return;
+            const normalized = (data || []).map((row: any) => ({
+                ...row,
+                shift_definition: Array.isArray(row.shift_definition) ? row.shift_definition[0] : row.shift_definition,
+            })) as ShiftAssignment[];
+            setFormDateAssignments(normalized);
+        })();
+        return () => { active = false; };
+    }, [showForm, form.shift_date]);
 
     async function saveShiftDef(e: React.FormEvent) {
         e.preventDefault();
+        setFormError('');
+        if (!form.staff_id) {
+            setFormError('Please select a staff member.');
+            return;
+        }
+        if (!form.shift_date) {
+            setFormError('Please select a shift date.');
+            return;
+        }
+        if (hasAssignmentConflict(form.staff_id, form.shift_date, form.start_time, form.end_time, editingAssignment?.id, formDateAssignments)) {
+            setFormError('Selected staff already has an overlapping shift on this date.');
+            return;
+        }
         setSaving(true);
         const payload = {
             name: form.name, start_time: form.start_time, end_time: form.end_time, color: form.color,
@@ -3063,16 +3149,69 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             block_outside_window: form.block_outside_window,
             published: form.published,
         };
-        if (editingShift) {
-            await supabase.from('shift_definitions').update(payload).eq('id', editingShift.id);
-        } else {
-            await supabase.from('shift_definitions').insert(payload);
+        try {
+            let shiftDefinitionId = editingAssignment?.shift_definition_id || editingShift?.id || null;
+            if (shiftDefinitionId) {
+                const { error } = await supabase.from('shift_definitions').update(payload).eq('id', shiftDefinitionId);
+                if (error) {
+                    setFormError(error.message);
+                    setSaving(false);
+                    return;
+                }
+            } else {
+                const { data, error } = await supabase
+                    .from('shift_definitions')
+                    .insert(payload)
+                    .select('id')
+                    .single();
+                if (error || !data) {
+                    setFormError(error?.message || 'Could not create shift definition.');
+                    setSaving(false);
+                    return;
+                }
+                shiftDefinitionId = data.id;
+            }
+
+            const assignmentPayload = {
+                shift_definition_id: shiftDefinitionId,
+                staff_id: form.staff_id,
+                shift_date: form.shift_date,
+                break_minutes_allowed: Math.max(0, Math.floor(form.break_minutes_allowed)),
+            };
+
+            if (editingAssignment) {
+                const { error } = await supabase
+                    .from('shift_assignments')
+                    .update(assignmentPayload)
+                    .eq('id', editingAssignment.id);
+                if (error) {
+                    setFormError(error.message);
+                    setSaving(false);
+                    return;
+                }
+            } else {
+                const { error } = await supabase.from('shift_assignments').insert(assignmentPayload);
+                if (error) {
+                    setFormError(error.message);
+                    setSaving(false);
+                    return;
+                }
+            }
+        } finally {
+            setSaving(false);
         }
-        setSaving(false);
+
         setShowForm(false);
         setEditingShift(null);
-        setForm({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal', early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30, block_outside_window: false, published: false });
+        setEditingAssignment(null);
+        setForm({
+            name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal',
+            shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_minutes_allowed: 60,
+            early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30,
+            block_outside_window: false, published: false
+        });
         fetchShiftDefs();
+        fetchAssignments();
     }
 
     async function deleteShiftDef(id: string) {
@@ -3083,12 +3222,16 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     }
 
     async function toggleAssignment(shiftDefId: string, staffId: string, date: string) {
+        const currentShift = shiftDefs.find(sd => sd.id === shiftDefId);
         const existing = assignments.find(
             a => a.shift_definition_id === shiftDefId && a.staff_id === staffId && a.shift_date === date
         );
         if (existing) {
             await supabase.from('shift_assignments').delete().eq('id', existing.id);
         } else {
+            if (currentShift && hasAssignmentConflict(staffId, date, currentShift.start_time, currentShift.end_time)) {
+                return;
+            }
             await supabase.from('shift_assignments').insert({
                 shift_definition_id: shiftDefId, staff_id: staffId, shift_date: date,
                 break_minutes_allowed: 60,
@@ -3097,10 +3240,42 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         fetchAssignments();
     }
 
-    async function updateAssignmentBreakMinutes(assignmentId: string, breakMinutesAllowed: number) {
-        const minutes = Number.isFinite(breakMinutesAllowed) ? Math.max(0, Math.floor(breakMinutesAllowed)) : 0;
-        await supabase.from('shift_assignments').update({ break_minutes_allowed: minutes }).eq('id', assignmentId);
-        fetchAssignments();
+    function openCreateShiftForm() {
+        setFormError('');
+        setShowForm(true);
+        setEditingShift(null);
+        setEditingAssignment(null);
+        setForm({
+            name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal',
+            shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_minutes_allowed: 60,
+            early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30,
+            block_outside_window: false, published: false
+        });
+    }
+
+    function openEditAssignmentForm(assignment: ShiftAssignment) {
+        const shift = assignment.shift_definition;
+        if (!shift) return;
+        setFormError('');
+        setEditingShift(shift);
+        setEditingAssignment(assignment);
+        setForm({
+            name: shift.name,
+            start_time: shift.start_time.slice(0, 5),
+            end_time: shift.end_time.slice(0, 5),
+            color: shift.color,
+            shift_type: shift.shift_type || 'normal',
+            shift_date: assignment.shift_date,
+            staff_id: assignment.staff_id,
+            break_minutes_allowed: assignment.break_minutes_allowed ?? 60,
+            early_checkin_minutes: shift.early_checkin_minutes ?? 15,
+            late_grace_minutes: shift.late_grace_minutes ?? 10,
+            early_checkout_minutes: shift.early_checkout_minutes ?? 0,
+            late_tolerance_minutes: shift.late_tolerance_minutes ?? 30,
+            block_outside_window: shift.block_outside_window ?? false,
+            published: shift.published ?? false
+        });
+        setShowForm(true);
     }
 
     async function copyWeekToNext() {
@@ -3197,7 +3372,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
                 <h2 style={styles.sectionTitle}>Shift Management</h2>
-                <button onClick={() => { setShowForm(true); setEditingShift(null); setForm({ name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal', early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30, block_outside_window: false, published: false }); }} className="btn-primary" style={{ width: 'auto', padding: '10px 20px', fontSize: 13 }}>
+                <button onClick={openCreateShiftForm} className="btn-primary" style={{ width: 'auto', padding: '10px 20px', fontSize: 13 }}>
                     + New Shift
                 </button>
             </div>
@@ -3220,7 +3395,6 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             <span style={{ width: 12, height: 12, borderRadius: '50%', background: sd.color, flexShrink: 0 }} />
                             <span style={{ color: '#fff', fontSize: 14, fontWeight: 700, flex: 1 }}>{sd.name}</span>
                             <div style={{ display: 'flex', gap: 4 }}>
-                                <button onClick={e => { e.stopPropagation(); setEditingShift(sd); setForm({ name: sd.name, start_time: sd.start_time.slice(0, 5), end_time: sd.end_time.slice(0, 5), color: sd.color, shift_type: sd.shift_type || 'normal', early_checkin_minutes: sd.early_checkin_minutes ?? 15, late_grace_minutes: sd.late_grace_minutes ?? 10, early_checkout_minutes: sd.early_checkout_minutes ?? 0, late_tolerance_minutes: sd.late_tolerance_minutes ?? 30, block_outside_window: sd.block_outside_window ?? false, published: sd.published ?? false }); setShowForm(true); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>✏️</button>
                                 <button onClick={e => { e.stopPropagation(); setDeleteId(sd.id); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>🗑️</button>
                             </div>
                         </div>
@@ -3313,6 +3487,12 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                             const assignment = getAssignment(selectedShift.id, staff.id, date);
                                             const assigned = !!assignment;
                                             const isToday = date === todayStr;
+                                            const blockedByConflict = !assigned && hasAssignmentConflict(
+                                                staff.id,
+                                                date,
+                                                selectedShift.start_time,
+                                                selectedShift.end_time
+                                            );
                                             return (
                                                 <td key={date} style={{ padding: '6px 4px', textAlign: 'center', borderBottom: '1px solid #1f1f1f', background: isToday ? 'rgba(240,180,39,0.03)' : 'transparent' }}>
                                                     <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
@@ -3322,35 +3502,32 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                                                 width: 36, height: 36, borderRadius: 10,
                                                                 border: assigned ? 'none' : '2px dashed #333',
                                                                 background: assigned ? selectedShift.color : 'transparent',
-                                                                cursor: 'pointer', fontSize: 14,
-                                                                transition: 'all 0.15s', opacity: assigned ? 1 : 0.5,
+                                                                cursor: blockedByConflict ? 'not-allowed' : 'pointer', fontSize: 14,
+                                                                transition: 'all 0.15s', opacity: blockedByConflict ? 0.25 : (assigned ? 1 : 0.5),
                                                                 color: assigned ? '#000' : '#555',
                                                                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                                                             }}
-                                                            title={assigned ? 'Click to remove' : 'Click to assign'}
+                                                            title={blockedByConflict ? 'Conflicts with another shift' : (assigned ? 'Click to remove' : 'Click to assign')}
+                                                            disabled={blockedByConflict}
                                                         >
                                                             {assigned ? '✓' : '+'}
                                                         </button>
                                                         {assignment && (
-                                                            <input
-                                                                type="number"
-                                                                min={0}
-                                                                step={1}
-                                                                defaultValue={assignment.break_minutes_allowed ?? 60}
-                                                                onClick={e => e.stopPropagation()}
-                                                                onBlur={e => updateAssignmentBreakMinutes(assignment.id, Number(e.target.value))}
+                                                            <button
+                                                                onClick={() => openEditAssignmentForm(assignment)}
                                                                 style={{
-                                                                    width: 52,
-                                                                    padding: '4px 6px',
-                                                                    borderRadius: 6,
+                                                                    background: '#1b1b1b',
                                                                     border: '1px solid #333',
-                                                                    background: '#121212',
-                                                                    color: '#bbb',
-                                                                    fontSize: 11,
-                                                                    textAlign: 'center',
+                                                                    borderRadius: 6,
+                                                                    color: '#999',
+                                                                    fontSize: 10,
+                                                                    padding: '4px 7px',
+                                                                    cursor: 'pointer',
                                                                 }}
-                                                                title="Break minutes allowed"
-                                                            />
+                                                                title="Edit assignment"
+                                                            >
+                                                                Edit
+                                                            </button>
                                                         )}
                                                     </div>
                                                 </td>
@@ -3423,15 +3600,11 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                 </div>
             </div>
 
-            {/* ─── Break Policies ─── */}
-            <BreakPoliciesPanel shiftDefs={shiftDefs} />
-
-
             {showForm && (
                 <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20, overflowY: 'auto' }}>
                     <div className="card" style={{ maxWidth: 520, width: '100%', padding: 24, margin: 'auto' }}>
                         <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
-                            {editingShift ? '✏️ Edit Shift' : '📅 New Shift Definition'}
+                            {editingAssignment ? '✏️ Edit Shift Assignment' : '📅 New Shift Assignment'}
                         </h3>
                         <form onSubmit={saveShiftDef}>
                             {/* Name + Type */}
@@ -3460,6 +3633,38 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                     <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>End Time</label>
                                     <input className="input-field" type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} required style={{ colorScheme: 'dark' }} />
                                 </div>
+                            </div>
+
+                            {/* Date + Staff */}
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Date</label>
+                                    <input className="input-field" type="date" value={form.shift_date} onChange={e => setForm({ ...form, shift_date: e.target.value })} required />
+                                </div>
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Staff</label>
+                                    <select className="input-field" value={form.staff_id} onChange={e => setForm({ ...form, staff_id: e.target.value })} required style={{ colorScheme: 'dark' }}>
+                                        <option value="">Select available staff</option>
+                                        {availableStaff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Break Budget */}
+                            <div style={{ background: '#111', borderRadius: 12, padding: '12px 14px', marginBottom: 12, border: '1px solid #2a2a2a' }}>
+                                <label style={{ fontSize: 12, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Max Break Time (min)</label>
+                                <input
+                                    className="input-field"
+                                    type="number"
+                                    min={0}
+                                    max={300}
+                                    value={form.break_minutes_allowed}
+                                    onChange={e => setForm({ ...form, break_minutes_allowed: Number(e.target.value) })}
+                                    style={{ padding: '8px 10px', fontSize: 13, maxWidth: 140 }}
+                                />
+                                <p style={{ color: '#666', fontSize: 11, margin: '8px 0 0' }}>
+                                    Staff can start/stop break multiple times until this total reaches 0.
+                                </p>
                             </div>
 
                             {/* Time Window Policy */}
@@ -3506,11 +3711,15 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                 </label>
                             </div>
 
+                            {formError && (
+                                <p style={{ color: '#ef4444', fontSize: 12, margin: '0 0 10px' }}>{formError}</p>
+                            )}
+
                             <div style={{ display: 'flex', gap: 8 }}>
                                 <button type="submit" className="btn-primary" disabled={saving} style={{ flex: 1, padding: 12 }}>
-                                    {saving ? 'Saving...' : editingShift ? '💾 Update Shift' : '📅 Create Shift'}
+                                    {saving ? 'Saving...' : editingAssignment ? '💾 Update Shift' : '📅 Create Shift'}
                                 </button>
-                                <button type="button" onClick={() => { setShowForm(false); setEditingShift(null); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
+                                <button type="button" onClick={() => { setShowForm(false); setEditingShift(null); setEditingAssignment(null); setFormError(''); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
                             </div>
                         </form>
                     </div>
@@ -3570,149 +3779,6 @@ function parseGoogleMapsUrl(url: string): { lat: number; lng: number } | null {
     return null;
 }
 
-
-// ═══════════════════════════════════════════════════
-//  BREAK POLICIES PANEL
-// ═══════════════════════════════════════════════════
-
-interface BreakPolicy {
-    id: string;
-    name: string;
-    shift_definition_id: string | null;
-    max_total_break_minutes: number;
-    min_work_before_break_minutes: number;
-    requires_geofence: boolean;
-    created_at: string;
-}
-
-function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: string }[] }) {
-    const [policies, setPolicies] = useState<BreakPolicy[]>([]);
-    const [showForm, setShowForm] = useState(false);
-    const [editingPolicy, setEditingPolicy] = useState<BreakPolicy | null>(null);
-    const [form, setForm] = useState({
-        name: '', shift_definition_id: '', max_total_break_minutes: 60,
-        min_work_before_break_minutes: 120, requires_geofence: false,
-    });
-    const [saving, setSaving] = useState(false);
-
-    const fetchPolicies = useCallback(async () => {
-        const { data } = await supabase.from('break_policies').select('*').order('created_at');
-        if (data) setPolicies(data);
-    }, []);
-
-    useEffect(() => { fetchPolicies(); }, [fetchPolicies]);
-
-    async function savePolicy(e: React.FormEvent) {
-        e.preventDefault();
-        setSaving(true);
-        const maxTotalBreak = Math.min(60, Math.max(5, form.max_total_break_minutes));
-        const payload = {
-            name: form.name,
-            shift_definition_id: form.shift_definition_id || null,
-            max_breaks: 99,
-            max_break_duration_minutes: 60,
-            max_total_break_minutes: maxTotalBreak,
-            min_work_before_break_minutes: form.min_work_before_break_minutes,
-            requires_geofence: form.requires_geofence,
-        };
-        if (editingPolicy) {
-            await supabase.from('break_policies').update(payload).eq('id', editingPolicy.id);
-        } else {
-            await supabase.from('break_policies').insert(payload);
-        }
-        setSaving(false);
-        setShowForm(false);
-        setEditingPolicy(null);
-        setForm({ name: '', shift_definition_id: '', max_total_break_minutes: 60, min_work_before_break_minutes: 120, requires_geofence: false });
-        fetchPolicies();
-    }
-
-    function editPolicy(p: BreakPolicy) {
-        setEditingPolicy(p);
-        setForm({ name: p.name, shift_definition_id: p.shift_definition_id || '', max_total_break_minutes: p.max_total_break_minutes, min_work_before_break_minutes: p.min_work_before_break_minutes, requires_geofence: p.requires_geofence });
-        setShowForm(true);
-    }
-
-    async function deletePolicy(id: string) {
-        await supabase.from('break_policies').delete().eq('id', id);
-        fetchPolicies();
-    }
-
-    const shiftName = (id: string | null) => shiftDefs.find(s => s.id === id)?.name || 'All shifts (global)';
-
-    return (
-        <div style={{ background: '#1a1a1a', borderRadius: 16, border: '1px solid #2a2a2a', padding: 20, marginTop: 24 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: 0 }}>☕ Break Policies</h3>
-                <button onClick={() => { setEditingPolicy(null); setForm({ name: '', shift_definition_id: '', max_total_break_minutes: 60, min_work_before_break_minutes: 120, requires_geofence: false }); setShowForm(true); }} className="btn-primary" style={{ width: 'auto', padding: '8px 14px', fontSize: 12 }}>+ New Policy</button>
-            </div>
-
-            {policies.length === 0 ? (
-                <p style={{ color: '#444', fontSize: 13, textAlign: 'center', padding: '16px 0' }}>No break policies defined. Breaks are unrestricted by default.</p>
-            ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {policies.map(p => (
-                        <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#111', borderRadius: 10, padding: '10px 14px', border: '1px solid #222' }}>
-                            <div style={{ flex: 1 }}>
-                                <div style={{ color: '#ccc', fontSize: 13, fontWeight: 600 }}>{p.name}</div>
-                                <div style={{ color: '#666', fontSize: 11, marginTop: 2 }}>
-                                    {shiftName(p.shift_definition_id)} · {p.max_total_break_minutes}min total break budget
-                                    {p.requires_geofence && ' · 📍 Geofenced'}
-                                </div>
-                            </div>
-                            <div style={{ display: 'flex', gap: 6 }}>
-                                <button onClick={() => editPolicy(p)} style={{ background: 'none', border: '1px solid #333', borderRadius: 8, color: '#888', cursor: 'pointer', fontSize: 12, padding: '5px 10px' }}>✏️ Edit</button>
-                                <button onClick={() => deletePolicy(p.id)} style={{ background: 'none', border: '1px solid #444', borderRadius: 8, color: '#ef4444', cursor: 'pointer', fontSize: 12, padding: '5px 10px' }}>🗑</button>
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            )}
-
-            {showForm && (
-                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, padding: 20 }}>
-                    <div className="card" style={{ maxWidth: 460, width: '100%', padding: 24 }}>
-                        <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 16 }}>{editingPolicy ? 'Edit Break Policy' : '+ New Break Policy'}</h3>
-                        <form onSubmit={savePolicy}>
-                            <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Policy Name</label>
-                            <input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. Standard Break Policy" required style={{ marginBottom: 10 }} />
-
-                            <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Applies to Shift (leave blank for all)</label>
-                            <select className="input-field" value={form.shift_definition_id} onChange={e => setForm({ ...form, shift_definition_id: e.target.value })} style={{ marginBottom: 10, colorScheme: 'dark' }}>
-                                <option value="">All shifts (global)</option>
-                                {shiftDefs.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                            </select>
-
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
-                                <div>
-                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Total Break (min)</label>
-                                    <input className="input-field" type="number" min={5} max={60} value={form.max_total_break_minutes} onChange={e => setForm({ ...form, max_total_break_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
-                                </div>
-                                <div>
-                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Min Work Before Break (min)</label>
-                                    <input className="input-field" type="number" min={0} max={480} value={form.min_work_before_break_minutes} onChange={e => setForm({ ...form, min_work_before_break_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
-                                </div>
-                            </div>
-                            <p style={{ fontSize: 11, color: '#666', margin: '0 0 10px' }}>
-                                Team agreement is enforced server-side using total break minutes only.
-                            </p>
-
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16 }}>
-                                <input type="checkbox" checked={form.requires_geofence} onChange={e => setForm({ ...form, requires_geofence: e.target.checked })} style={{ accentColor: '#f0b427' }} />
-                                <span style={{ fontSize: 12, color: '#ccc' }}>Require on-site GPS to start break</span>
-                            </label>
-
-                            <div style={{ display: 'flex', gap: 8 }}>
-                                <button type="submit" className="btn-primary" disabled={saving} style={{ flex: 1, padding: 12 }}>{saving ? 'Saving...' : editingPolicy ? '💾 Update' : '+ Create'}</button>
-                                <button type="button" onClick={() => { setShowForm(false); setEditingPolicy(null); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-        </div>
-    );
-}
 
 function SettingsPanel() {
     const [mapsLink, setMapsLink] = useState('');
