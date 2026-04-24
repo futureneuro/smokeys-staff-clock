@@ -3579,8 +3579,6 @@ interface BreakPolicy {
     id: string;
     name: string;
     shift_definition_id: string | null;
-    max_breaks: number;
-    max_break_duration_minutes: number;
     max_total_break_minutes: number;
     min_work_before_break_minutes: number;
     requires_geofence: boolean;
@@ -3592,8 +3590,7 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
     const [showForm, setShowForm] = useState(false);
     const [editingPolicy, setEditingPolicy] = useState<BreakPolicy | null>(null);
     const [form, setForm] = useState({
-        name: '', shift_definition_id: '', max_breaks: 2,
-        max_break_duration_minutes: 30, max_total_break_minutes: 60,
+        name: '', shift_definition_id: '', max_total_break_minutes: 60,
         min_work_before_break_minutes: 120, requires_geofence: false,
     });
     const [saving, setSaving] = useState(false);
@@ -3608,14 +3605,12 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
     async function savePolicy(e: React.FormEvent) {
         e.preventDefault();
         setSaving(true);
-        const maxBreaks = Math.min(2, Math.max(1, form.max_breaks));
-        const maxBreakDuration = Math.min(30, Math.max(5, form.max_break_duration_minutes));
-        const maxTotalBreak = Math.min(60, Math.max(maxBreakDuration, form.max_total_break_minutes));
+        const maxTotalBreak = Math.min(60, Math.max(5, form.max_total_break_minutes));
         const payload = {
             name: form.name,
             shift_definition_id: form.shift_definition_id || null,
-            max_breaks: maxBreaks,
-            max_break_duration_minutes: maxBreakDuration,
+            max_breaks: 99,
+            max_break_duration_minutes: 60,
             max_total_break_minutes: maxTotalBreak,
             min_work_before_break_minutes: form.min_work_before_break_minutes,
             requires_geofence: form.requires_geofence,
@@ -3628,13 +3623,13 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
         setSaving(false);
         setShowForm(false);
         setEditingPolicy(null);
-        setForm({ name: '', shift_definition_id: '', max_breaks: 2, max_break_duration_minutes: 30, max_total_break_minutes: 60, min_work_before_break_minutes: 120, requires_geofence: false });
+        setForm({ name: '', shift_definition_id: '', max_total_break_minutes: 60, min_work_before_break_minutes: 120, requires_geofence: false });
         fetchPolicies();
     }
 
     function editPolicy(p: BreakPolicy) {
         setEditingPolicy(p);
-        setForm({ name: p.name, shift_definition_id: p.shift_definition_id || '', max_breaks: p.max_breaks, max_break_duration_minutes: p.max_break_duration_minutes, max_total_break_minutes: p.max_total_break_minutes, min_work_before_break_minutes: p.min_work_before_break_minutes, requires_geofence: p.requires_geofence });
+        setForm({ name: p.name, shift_definition_id: p.shift_definition_id || '', max_total_break_minutes: p.max_total_break_minutes, min_work_before_break_minutes: p.min_work_before_break_minutes, requires_geofence: p.requires_geofence });
         setShowForm(true);
     }
 
@@ -3649,7 +3644,7 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
         <div style={{ background: '#1a1a1a', borderRadius: 16, border: '1px solid #2a2a2a', padding: 20, marginTop: 24 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: 0 }}>☕ Break Policies</h3>
-                <button onClick={() => { setEditingPolicy(null); setForm({ name: '', shift_definition_id: '', max_breaks: 2, max_break_duration_minutes: 30, max_total_break_minutes: 60, min_work_before_break_minutes: 120, requires_geofence: false }); setShowForm(true); }} className="btn-primary" style={{ width: 'auto', padding: '8px 14px', fontSize: 12 }}>+ New Policy</button>
+                <button onClick={() => { setEditingPolicy(null); setForm({ name: '', shift_definition_id: '', max_total_break_minutes: 60, min_work_before_break_minutes: 120, requires_geofence: false }); setShowForm(true); }} className="btn-primary" style={{ width: 'auto', padding: '8px 14px', fontSize: 12 }}>+ New Policy</button>
             </div>
 
             {policies.length === 0 ? (
@@ -3661,7 +3656,7 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
                             <div style={{ flex: 1 }}>
                                 <div style={{ color: '#ccc', fontSize: 13, fontWeight: 600 }}>{p.name}</div>
                                 <div style={{ color: '#666', fontSize: 11, marginTop: 2 }}>
-                                    {shiftName(p.shift_definition_id)} · {p.max_breaks} breaks · {p.max_break_duration_minutes}min each · {p.max_total_break_minutes}min total
+                                    {shiftName(p.shift_definition_id)} · {p.max_total_break_minutes}min total break budget
                                     {p.requires_geofence && ' · 📍 Geofenced'}
                                 </div>
                             </div>
@@ -3690,14 +3685,6 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
 
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
                                 <div>
-                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Breaks</label>
-                                    <input className="input-field" type="number" min={1} max={2} value={form.max_breaks} onChange={e => setForm({ ...form, max_breaks: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
-                                </div>
-                                <div>
-                                    <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Duration (min)</label>
-                                    <input className="input-field" type="number" min={5} max={30} value={form.max_break_duration_minutes} onChange={e => setForm({ ...form, max_break_duration_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
-                                </div>
-                                <div>
                                     <label style={{ fontSize: 11, color: '#666', display: 'block', marginBottom: 4 }}>Max Total Break (min)</label>
                                     <input className="input-field" type="number" min={5} max={60} value={form.max_total_break_minutes} onChange={e => setForm({ ...form, max_total_break_minutes: Number(e.target.value) })} style={{ padding: '8px 10px', fontSize: 13 }} />
                                 </div>
@@ -3707,7 +3694,7 @@ function BreakPoliciesPanel({ shiftDefs }: { shiftDefs: { id: string; name: stri
                                 </div>
                             </div>
                             <p style={{ fontSize: 11, color: '#666', margin: '0 0 10px' }}>
-                                Team agreement is enforced server-side: maximum 2 breaks, 30 minutes each, 60 minutes total.
+                                Team agreement is enforced server-side using total break minutes only.
                             </p>
 
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16 }}>
