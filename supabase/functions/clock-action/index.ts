@@ -78,7 +78,7 @@ Deno.serve(async req => {
 
   const identity = await resolveStaffIdentity(req, body, supabase);
   if (!identity.ok) {
-    return errorResponse(identity.error, identity.status);
+    return errorResponse((identity as any).error, (identity as any).status);
   }
   const staff = identity.staff;
 

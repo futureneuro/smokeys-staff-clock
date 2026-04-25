@@ -335,7 +335,8 @@ export default function StaffDashboard() {
             .eq('time_log_id', timeLogId)
             .is('break_end', null)
             .limit(1);
-        setActiveBreak(active && active.length > 0 ? active[0] : null);
+        const nextActiveBreak = active && active.length > 0 ? active[0] : null;
+        setActiveBreak(nextActiveBreak);
         // Break duration and count
         const { data: allBreaks } = await supabase
             .from('breaks')
@@ -354,7 +355,17 @@ export default function StaffDashboard() {
         }
         setPastBreaksSeconds(usedSecs);
         setBreakCount(count);
+        return { hasActiveBreak: !!nextActiveBreak };
     }, []);
+
+    const syncBreakState = useCallback(async (timeLogId: string, shouldBeActive: boolean) => {
+        // Small retry window prevents UI flicker when the break row update is still propagating.
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const snapshot = await fetchBreakData(timeLogId);
+            if (snapshot.hasActiveBreak === shouldBeActive) return;
+            await new Promise(resolve => setTimeout(resolve, 250));
+        }
+    }, [fetchBreakData]);
 
     // When open log changes, fetch break state
     useEffect(() => {
@@ -413,7 +424,7 @@ export default function StaffDashboard() {
             if (result.success) {
                 setBreakSuccess(location.ok ? 'Break auto-ended.' : 'Break auto-ended (no live location).');
                 setAutoEndingBreak(false);
-                if (openLog) fetchBreakData(openLog.id);
+                if (openLog) await syncBreakState(openLog.id, false);
                 setTimeout(() => setBreakSuccess(''), 5000);
             } else {
                 setBreakError(result.error || 'Failed to auto-end break.');
@@ -528,6 +539,12 @@ export default function StaffDashboard() {
         setBreakSuccess('');
         if (action === 'break_end') setAutoEndingBreak(false);
 
+        if (action === 'break_end' && breakTimer > 0 && breakTimer <= 300) {
+            setBreakError('Cannot manually end break in the last 5 minutes. It will end automatically.');
+            setBreakLoading(false);
+            return;
+        }
+
         if (action === 'break_start' && breakDurationSeconds <= 0) {
             setBreakError('No break allowed for this shift.');
             setBreakLoading(false);
@@ -553,7 +570,7 @@ export default function StaffDashboard() {
                 : location.ok
                     ? 'Break ended.'
                     : 'Break ended without live location.');
-            if (openLog) fetchBreakData(openLog.id);
+            if (openLog) await syncBreakState(openLog.id, action === 'break_start');
             setTimeout(() => setBreakSuccess(''), 5000);
         } else {
             setBreakError(result.error || 'Failed');
@@ -996,17 +1013,17 @@ export default function StaffDashboard() {
                         {activeBreak ? (
                             <button
                                 onClick={() => handleBreak('break_end')}
-                                disabled={breakLoading}
+                                disabled={breakLoading || (breakTimer > 0 && breakTimer <= 300)}
                                 style={{
                                     width: '100%', padding: '14px', borderRadius: 14,
-                                    background: breakLoading ? 'rgba(245,158,11,0.15)' : 'rgba(245,158,11,0.1)',
+                                    background: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 'rgba(245,158,11,0.15)' : 'rgba(245,158,11,0.1)',
                                     border: '2px solid #f59e0b',
                                     color: '#f59e0b',
-                                    fontSize: 15, fontWeight: 700, cursor: breakLoading ? 'not-allowed' : 'pointer',
-                                    transition: 'all 0.2s', opacity: breakLoading ? 0.6 : 1,
+                                    fontSize: 15, fontWeight: 700, cursor: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 'not-allowed' : 'pointer',
+                                    transition: 'all 0.2s', opacity: (breakLoading || (breakTimer > 0 && breakTimer <= 300)) ? 0.6 : 1,
                                 }}
                             >
-                                {breakLoading ? '...' : '⏹ Stop Break'}
+                                {breakLoading ? '...' : (breakTimer > 0 && breakTimer <= 300) ? '⏳ Auto-ending soon...' : '⏹ Stop Break'}
                             </button>
                         ) : geoStatus === 'ok' ? (
                             <button
