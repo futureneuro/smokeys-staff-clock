@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { EDGE_FUNCTIONS_BASE_URL, supabase } from '@/lib/supabase';
 
@@ -3004,6 +3004,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     const [editingShift, setEditingShift] = useState<ShiftDefinition | null>(null);
     const [editingAssignment, setEditingAssignment] = useState<ShiftAssignment | null>(null);
     const [formError, setFormError] = useState('');
+    const [shiftFormMultiHint, setShiftFormMultiHint] = useState<string | null>(null);
     const [form, setForm] = useState({
         name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427',
         shift_type: 'normal',
@@ -3070,6 +3071,13 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         editingAssignment?.id,
         formDateAssignments
     ));
+
+    const staffSelectOptions = useMemo(() => {
+        const ids = new Set(availableStaff.map(s => s.id));
+        const current = form.staff_id ? activeStaff.find(s => s.id === form.staff_id) : undefined;
+        if (current && !ids.has(current.id)) return [current, ...availableStaff];
+        return availableStaff;
+    }, [availableStaff, activeStaff, form.staff_id]);
 
     // Get week dates
     const getWeekDates = useCallback(() => {
@@ -3244,6 +3252,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         setShowForm(false);
         setEditingShift(null);
         setEditingAssignment(null);
+        setShiftFormMultiHint(null);
         setForm({
             name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal',
             shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_minutes_allowed: 60,
@@ -3292,6 +3301,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     function openCreateShiftForm() {
         setFormError('');
         setDeleteError('');
+        setShiftFormMultiHint(null);
         setShowForm(true);
         setEditingShift(null);
         setEditingAssignment(null);
@@ -3303,10 +3313,11 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         });
     }
 
-    function openEditAssignmentForm(assignment: ShiftAssignment) {
+    function openEditAssignmentForm(assignment: ShiftAssignment, multiWeekHint: string | null = null) {
         const shift = assignment.shift_definition;
         if (!shift) return;
         setFormError('');
+        setShiftFormMultiHint(multiWeekHint);
         setEditingShift(shift);
         setEditingAssignment(assignment);
         setForm({
@@ -3328,25 +3339,70 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         setShowForm(true);
     }
 
-    function openEditShiftForm(shift: ShiftDefinition) {
+    async function openEditShiftForm(shift: ShiftDefinition) {
         setFormError('');
+        const latestDef = shiftDefs.find(d => d.id === shift.id) || shift;
+        const inWeek = assignments
+            .filter(a => a.shift_definition_id === shift.id && weekDates.includes(a.shift_date))
+            .sort((a, b) => a.shift_date.localeCompare(b.shift_date) || a.staff_id.localeCompare(b.staff_id));
+
+        let pick: ShiftAssignment | null = inWeek[0] ?? null;
+        if (pick) {
+            pick = { ...pick, shift_definition: shiftDefs.find(d => d.id === shift.id) || pick.shift_definition || latestDef };
+        }
+
+        if (!pick) {
+            const { data } = await supabase
+                .from('shift_assignments')
+                .select('id, shift_definition_id, staff_id, shift_date, break_minutes_allowed, time_log_id, staff:staff(id, name, staff_code)')
+                .eq('shift_definition_id', shift.id)
+                .order('shift_date', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+            if (data) {
+                const row = data as Record<string, unknown>;
+                const staffRel = row.staff;
+                const staffNorm = Array.isArray(staffRel) ? staffRel[0] : staffRel;
+                pick = {
+                    id: row.id as string,
+                    shift_definition_id: row.shift_definition_id as string,
+                    staff_id: row.staff_id as string,
+                    shift_date: row.shift_date as string,
+                    break_minutes_allowed: (row.break_minutes_allowed as number) ?? 60,
+                    time_log_id: (row.time_log_id as string | null) ?? null,
+                    shift_definition: latestDef,
+                    staff: staffNorm as ShiftAssignment['staff'],
+                };
+            }
+        }
+
+        if (pick?.shift_definition) {
+            const multiHint =
+                inWeek.length > 1
+                    ? `${inWeek.length} assignments this week — editing ${pick.shift_date}${pick.staff?.name ? ` · ${pick.staff.name}` : ''}. Use Edit on the schedule for other days.`
+                    : null;
+            openEditAssignmentForm(pick, multiHint);
+            return;
+        }
+
+        setShiftFormMultiHint(null);
         setEditingAssignment(null);
-        setEditingShift(shift);
+        setEditingShift(latestDef);
         setForm({
-            name: shift.name,
-            start_time: shift.start_time.slice(0, 5),
-            end_time: shift.end_time.slice(0, 5),
-            color: shift.color,
-            shift_type: shift.shift_type || 'normal',
+            name: latestDef.name,
+            start_time: latestDef.start_time.slice(0, 5),
+            end_time: latestDef.end_time.slice(0, 5),
+            color: latestDef.color,
+            shift_type: latestDef.shift_type || 'normal',
             shift_date: '',
             staff_id: '',
             break_minutes_allowed: 60,
-            early_checkin_minutes: shift.early_checkin_minutes,
-            late_grace_minutes: shift.late_grace_minutes,
-            early_checkout_minutes: shift.early_checkout_minutes,
-            late_tolerance_minutes: shift.late_tolerance_minutes,
-            block_outside_window: shift.block_outside_window,
-            published: shift.published,
+            early_checkin_minutes: latestDef.early_checkin_minutes,
+            late_grace_minutes: latestDef.late_grace_minutes,
+            early_checkout_minutes: latestDef.early_checkout_minutes,
+            late_tolerance_minutes: latestDef.late_tolerance_minutes,
+            block_outside_window: latestDef.block_outside_window,
+            published: latestDef.published,
         });
         setShowForm(true);
     }
@@ -3468,7 +3524,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             <span style={{ width: 12, height: 12, borderRadius: '50%', background: sd.color, flexShrink: 0 }} />
                             <span style={{ color: '#fff', fontSize: 14, fontWeight: 700, flex: 1 }}>{sd.name}</span>
                             <div style={{ display: 'flex', gap: 4 }}>
-                                <button onClick={e => { e.stopPropagation(); openEditShiftForm(sd); }} title="Edit shift" style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>✏️</button>
+                                <button onClick={e => { e.stopPropagation(); void openEditShiftForm(sd); }} title="Edit shift" style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>✏️</button>
                                 <button onClick={e => { e.stopPropagation(); setDeleteError(''); setDeleteId(sd.id); }} title="Delete shift" style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>🗑️</button>
                             </div>
                         </div>
@@ -3680,6 +3736,11 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                         <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
                             {editingShift && !editingAssignment ? '✏️ Edit Shift' : editingAssignment ? '✏️ Edit Shift Assignment' : '📅 New Shift Assignment'}
                         </h3>
+                        {shiftFormMultiHint && (
+                            <p style={{ color: '#d97706', fontSize: 12, margin: '0 0 12px', lineHeight: 1.45, background: 'rgba(217,119,6,0.12)', padding: '10px 12px', borderRadius: 8, border: '1px solid rgba(217,119,6,0.25)' }}>
+                                {shiftFormMultiHint}
+                            </p>
+                        )}
                         {editingShift && !editingAssignment && (
                             <p style={{ color: '#777', fontSize: 12, margin: '0 0 16px', lineHeight: 1.45 }}>
                                 Times and policy apply to every day this shift is used. Pick staff and date below to add or update that day&apos;s assignment and break budget—or leave them empty to only update the template.
@@ -3717,7 +3778,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             {/* Date + Staff */}
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
                                 <div>
-                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Date</label>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift day</label>
                                     <input
                                         className="input-field"
                                         type="date"
@@ -3736,7 +3797,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                         style={{ colorScheme: 'dark' }}
                                     >
                                         <option value="">{editingShift && !editingAssignment ? '— Optional —' : 'Select available staff'}</option>
-                                        {availableStaff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                        {staffSelectOptions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                     </select>
                                 </div>
                             </div>
@@ -3813,7 +3874,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                 <button type="submit" className="btn-primary" disabled={saving} style={{ flex: 1, padding: 12 }}>
                                     {saving ? 'Saving...' : editingShift && !editingAssignment ? '💾 Save Shift' : editingAssignment ? '💾 Update Shift' : '📅 Create Shift'}
                                 </button>
-                                <button type="button" onClick={() => { setShowForm(false); setEditingShift(null); setEditingAssignment(null); setFormError(''); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
+                                <button type="button" onClick={() => { setShowForm(false); setEditingShift(null); setEditingAssignment(null); setFormError(''); setShiftFormMultiHint(null); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
                             </div>
                         </form>
                     </div>
