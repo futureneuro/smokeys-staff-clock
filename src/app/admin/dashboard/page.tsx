@@ -2983,9 +2983,29 @@ interface ShiftAssignment {
     staff_id: string;
     shift_date: string;
     break_minutes_allowed: number;
+    break_slot_minutes?: number[];
     time_log_id?: string | null;
     shift_definition?: ShiftDefinition;
     staff?: { id: string; name: string; staff_code: string };
+}
+
+function sumBreakSlots(slots: number[]): number {
+    return slots.reduce((acc, m) => acc + (Number.isFinite(m) && m > 0 ? Math.floor(m) : 0), 0);
+}
+
+function slotsFromAssignment(a: ShiftAssignment): number[] {
+    if (a.break_slot_minutes && a.break_slot_minutes.length > 0) {
+        return a.break_slot_minutes.map(m => Math.max(0, Math.floor(Number(m))));
+    }
+    if ((a.break_minutes_allowed ?? 0) > 0) return [a.break_minutes_allowed];
+    return [];
+}
+
+function formatBreakBadge(slots: number[], breakMinutesFallback: number): string {
+    const s = slots.length > 0 ? slots : breakMinutesFallback > 0 ? [breakMinutesFallback] : [];
+    if (s.length === 0) return 'No break';
+    if (s.length === 1) return `${s[0]}m`;
+    return `${s.join('+')}m`;
 }
 
 interface ShiftTemplateDay {
@@ -3010,7 +3030,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         shift_type: 'normal',
         shift_date: new Date().toISOString().slice(0, 10),
         staff_id: '',
-        break_minutes_allowed: 60,
+        break_slot_minutes: [60] as number[],
         early_checkin_minutes: 15,
         late_grace_minutes: 10,
         early_checkout_minutes: 0,
@@ -3121,7 +3141,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         (async () => {
             const { data } = await supabase
                 .from('shift_assignments')
-                .select('id, shift_definition_id, staff_id, shift_date, break_minutes_allowed, shift_definition:shift_definitions(*)')
+                .select('id, shift_definition_id, staff_id, shift_date, break_minutes_allowed, break_slot_minutes, shift_definition:shift_definitions(*)')
                 .eq('shift_date', form.shift_date);
             if (!active) return;
             const normalized = (data || []).map((row: any) => ({
@@ -3165,6 +3185,20 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                 setFormError('Selected staff already has an overlapping shift on this date.');
                 return;
             }
+            const normalizedSlots: number[] = [];
+            for (const m of form.break_slot_minutes) {
+                const v = Math.floor(Number(m));
+                if (!Number.isFinite(v) || v <= 0) continue;
+                if (v < 1 || v > 120) {
+                    setFormError('Each break slot must be between 1 and 120 minutes.');
+                    return;
+                }
+                normalizedSlots.push(v);
+            }
+            if (normalizedSlots.length > 20) {
+                setFormError('Maximum 20 break periods per shift.');
+                return;
+            }
         }
         setSaving(true);
         const payload = {
@@ -3201,11 +3235,16 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             }
 
             if (wantsAssignment && shiftDefinitionId) {
+                const normalizedSlots = form.break_slot_minutes
+                    .map(m => Math.floor(Number(m)))
+                    .filter(v => Number.isFinite(v) && v > 0 && v >= 1 && v <= 120);
+                const slotSum = sumBreakSlots(normalizedSlots);
                 const assignmentPayload = {
                     shift_definition_id: shiftDefinitionId,
                     staff_id: form.staff_id,
                     shift_date: form.shift_date,
-                    break_minutes_allowed: Math.max(0, Math.floor(form.break_minutes_allowed)),
+                    break_slot_minutes: normalizedSlots,
+                    break_minutes_allowed: Math.max(0, slotSum),
                 };
 
                 let targetAssignmentId = editingAssignment?.id ?? null;
@@ -3255,7 +3294,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         setShiftFormMultiHint(null);
         setForm({
             name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal',
-            shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_minutes_allowed: 60,
+            shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_slot_minutes: [60],
             early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30,
             block_outside_window: false, published: false
         });
@@ -3292,6 +3331,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             }
             await supabase.from('shift_assignments').insert({
                 shift_definition_id: shiftDefId, staff_id: staffId, shift_date: date,
+                break_slot_minutes: [60],
                 break_minutes_allowed: 60,
             });
         }
@@ -3307,7 +3347,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         setEditingAssignment(null);
         setForm({
             name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal',
-            shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_minutes_allowed: 60,
+            shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_slot_minutes: [60],
             early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30,
             block_outside_window: false, published: false
         });
@@ -3328,7 +3368,10 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             shift_type: shift.shift_type || 'normal',
             shift_date: assignment.shift_date,
             staff_id: assignment.staff_id,
-            break_minutes_allowed: assignment.break_minutes_allowed ?? 60,
+            break_slot_minutes: (() => {
+                const s = slotsFromAssignment(assignment);
+                return s.length > 0 ? s : [60];
+            })(),
             early_checkin_minutes: shift.early_checkin_minutes ?? 15,
             late_grace_minutes: shift.late_grace_minutes ?? 10,
             early_checkout_minutes: shift.early_checkout_minutes ?? 0,
@@ -3354,7 +3397,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         if (!pick) {
             const { data } = await supabase
                 .from('shift_assignments')
-                .select('id, shift_definition_id, staff_id, shift_date, break_minutes_allowed, time_log_id, staff:staff(id, name, staff_code)')
+                .select('id, shift_definition_id, staff_id, shift_date, break_minutes_allowed, break_slot_minutes, time_log_id, staff:staff(id, name, staff_code)')
                 .eq('shift_definition_id', shift.id)
                 .order('shift_date', { ascending: false })
                 .limit(1)
@@ -3369,6 +3412,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                     staff_id: row.staff_id as string,
                     shift_date: row.shift_date as string,
                     break_minutes_allowed: (row.break_minutes_allowed as number) ?? 60,
+                    break_slot_minutes: (row.break_slot_minutes as number[] | undefined) ?? undefined,
                     time_log_id: (row.time_log_id as string | null) ?? null,
                     shift_definition: latestDef,
                     staff: staffNorm as ShiftAssignment['staff'],
@@ -3396,7 +3440,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             shift_type: latestDef.shift_type || 'normal',
             shift_date: '',
             staff_id: '',
-            break_minutes_allowed: 60,
+            break_slot_minutes: [60],
             early_checkin_minutes: latestDef.early_checkin_minutes,
             late_grace_minutes: latestDef.late_grace_minutes,
             early_checkout_minutes: latestDef.early_checkout_minutes,
@@ -3413,12 +3457,16 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             d.setDate(d.getDate() + 7 + i);
             return d.toISOString().slice(0, 10);
         });
-        const inserts = assignments.map(a => ({
-            shift_definition_id: a.shift_definition_id,
-            staff_id: a.staff_id,
-            shift_date: nextWeekDates[weekDates.indexOf(a.shift_date)] || nextWeekDates[new Date(a.shift_date).getDay() === 0 ? 6 : new Date(a.shift_date).getDay() - 1],
-            break_minutes_allowed: a.break_minutes_allowed ?? 60,
-        })).filter(ins => ins.shift_date);
+        const inserts = assignments.map(a => {
+            const slots = slotsFromAssignment(a);
+            return {
+                shift_definition_id: a.shift_definition_id,
+                staff_id: a.staff_id,
+                shift_date: nextWeekDates[weekDates.indexOf(a.shift_date)] || nextWeekDates[new Date(a.shift_date).getDay() === 0 ? 6 : new Date(a.shift_date).getDay() - 1],
+                break_slot_minutes: slots,
+                break_minutes_allowed: sumBreakSlots(slots),
+            };
+        }).filter(ins => ins.shift_date);
         if (inserts.length > 0) {
             await supabase.from('shift_assignments').upsert(inserts, { onConflict: 'shift_definition_id,staff_id,shift_date' });
             setWeekOffset(weekOffset + 1);
@@ -3476,7 +3524,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
 
     async function applyTemplateDaysToWeek() {
         if (!selectedShiftId || selectedTemplateDays.length === 0 || activeStaff.length === 0) return;
-        const inserts: Array<{ shift_definition_id: string; staff_id: string; shift_date: string; break_minutes_allowed: number }> = [];
+        const inserts: Array<{ shift_definition_id: string; staff_id: string; shift_date: string; break_slot_minutes: number[]; break_minutes_allowed: number }> = [];
         for (const staff of activeStaff) {
             for (const date of weekDates) {
                 const dayOfWeek = new Date(`${date}T12:00:00Z`).getUTCDay();
@@ -3485,6 +3533,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                         shift_definition_id: selectedShiftId,
                         staff_id: staff.id,
                         shift_date: date,
+                        break_slot_minutes: [60],
                         break_minutes_allowed: 60,
                     });
                 }
@@ -3711,9 +3760,9 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                                         return (
                                                             <div key={s.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 10 }}>
                                                                 <div style={{ fontSize: 10, color: '#666' }}>{s.name}</div>
-                                                                {assignment && assignment.break_minutes_allowed !== undefined && (
+                                                                {assignment && (
                                                                     <div style={{ fontSize: 9, background: '#333', color: '#aaa', padding: '2px 4px', borderRadius: 4, marginLeft: 4 }}>
-                                                                        {assignment.break_minutes_allowed}m break
+                                                                        {formatBreakBadge(slotsFromAssignment(assignment), assignment.break_minutes_allowed ?? 0)}
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -3802,23 +3851,58 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                                 </div>
                             </div>
 
-                            {/* Break Budget */}
+                            {/* Break periods (ordered slots) */}
                             <div style={{ background: '#111', borderRadius: 12, padding: '12px 14px', marginBottom: 12, border: '1px solid #2a2a2a', opacity: editingShift && !editingAssignment && !(form.staff_id && form.shift_date) ? 0.55 : 1 }}>
-                                <label style={{ fontSize: 12, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Max Break Time (min)</label>
-                                <input
-                                    className="input-field"
-                                    type="number"
-                                    min={0}
-                                    max={300}
-                                    value={form.break_minutes_allowed}
-                                    onChange={e => setForm({ ...form, break_minutes_allowed: Number(e.target.value) })}
-                                    disabled={Boolean(editingShift && !editingAssignment && !(form.staff_id && form.shift_date))}
-                                    style={{ padding: '8px 10px', fontSize: 13, maxWidth: 140 }}
-                                />
-                                <p style={{ color: '#666', fontSize: 11, margin: '8px 0 0' }}>
+                                <label style={{ fontSize: 12, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 8 }}>Break periods (minutes each)</label>
+                                <p style={{ color: '#666', fontSize: 11, margin: '0 0 10px' }}>
                                     {editingShift && !editingAssignment && !(form.staff_id && form.shift_date)
-                                        ? 'Choose staff and date above to set break minutes for that assignment.'
-                                        : 'Staff can start/stop break multiple times until this total reaches 0.'}
+                                        ? 'Choose staff and date above to edit break periods for that assignment.'
+                                        : 'Each period runs as one break; it ends automatically when the time is up. Staff can start the next period later in the shift.'}
+                                </p>
+                                {form.break_slot_minutes.map((mins, idx) => (
+                                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                                        <span style={{ color: '#888', fontSize: 12, minWidth: 72 }}>Period {idx + 1}</span>
+                                        <input
+                                            className="input-field"
+                                            type="number"
+                                            min={1}
+                                            max={120}
+                                            value={mins}
+                                            onChange={e => {
+                                                const next = [...form.break_slot_minutes];
+                                                next[idx] = Number(e.target.value);
+                                                setForm({ ...form, break_slot_minutes: next });
+                                            }}
+                                            disabled={Boolean(editingShift && !editingAssignment && !(form.staff_id && form.shift_date))}
+                                            style={{ padding: '8px 10px', fontSize: 13, maxWidth: 100 }}
+                                        />
+                                        <span style={{ color: '#666', fontSize: 11 }}>min</span>
+                                        <button
+                                            type="button"
+                                            className="btn-secondary"
+                                            disabled={Boolean(editingShift && !editingAssignment && !(form.staff_id && form.shift_date))}
+                                            style={{ padding: '6px 10px', fontSize: 11 }}
+                                            onClick={() => {
+                                                const next = form.break_slot_minutes.filter((_, i) => i !== idx);
+                                                setForm({ ...form, break_slot_minutes: next.length > 0 ? next : [] });
+                                            }}
+                                        >
+                                            Remove
+                                        </button>
+                                    </div>
+                                ))}
+                                <button
+                                    type="button"
+                                    className="btn-secondary"
+                                    disabled={Boolean(editingShift && !editingAssignment && !(form.staff_id && form.shift_date)) || form.break_slot_minutes.length >= 20}
+                                    style={{ padding: '8px 12px', fontSize: 12, marginBottom: 8 }}
+                                    onClick={() => setForm({ ...form, break_slot_minutes: [...form.break_slot_minutes, 15] })}
+                                >
+                                    + Add period
+                                </button>
+                                <p style={{ color: '#888', fontSize: 11, margin: 0 }}>
+                                    Total: {sumBreakSlots(form.break_slot_minutes.filter(m => Number.isFinite(m) && m > 0))} min
+                                    {form.break_slot_minutes.length === 0 ? ' · No breaks on this assignment' : ` · ${form.break_slot_minutes.filter(m => Number.isFinite(m) && m > 0).length} period(s)`}
                                 </p>
                             </div>
 

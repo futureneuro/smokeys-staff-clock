@@ -176,11 +176,55 @@ Deno.serve(async req => {
       return errorResponse('A break is already active.', 409);
     }
 
+    const { count: completedBreaks } = await supabase
+      .from('breaks')
+      .select('*', { count: 'exact', head: true })
+      .eq('time_log_id', openLog.log.id)
+      .not('break_end', 'is', null);
+
+    let slots: number[] | null = null;
+    let legMins = 0;
+    const { data: saByLog } = await supabase
+      .from('shift_assignments')
+      .select('break_slot_minutes, break_minutes_allowed')
+      .eq('time_log_id', openLog.log.id)
+      .maybeSingle();
+    if (saByLog) {
+      slots = (saByLog as { break_slot_minutes: number[] | null; break_minutes_allowed: number }).break_slot_minutes;
+      legMins = (saByLog as { break_minutes_allowed: number }).break_minutes_allowed ?? 0;
+    }
+    if (!slots || slots.length === 0) {
+      const { data: saByDay } = await supabase
+        .from('shift_assignments')
+        .select('break_slot_minutes, break_minutes_allowed')
+        .eq('staff_id', staff.id)
+        .eq('shift_date', todayBogota)
+        .maybeSingle();
+      if (saByDay) {
+        slots = (saByDay as { break_slot_minutes: number[] | null; break_minutes_allowed: number }).break_slot_minutes;
+        legMins = (saByDay as { break_minutes_allowed: number }).break_minutes_allowed ?? 0;
+      }
+    }
+    if (!slots || slots.length === 0) {
+      if (legMins > 0) {
+        slots = [legMins];
+      } else {
+        return errorResponse('No break allowed for this shift.', 409);
+      }
+    }
+
+    const k = completedBreaks ?? 0;
+    if (k >= slots.length) {
+      return errorResponse('No more breaks for this shift.', 409);
+    }
+
+    // duration_minutes on break_end is derived by DB trigger enforce_team_break_limits()
     const { error: breakError } = await supabase
       .from('breaks')
       .insert({
         time_log_id: openLog.log.id,
         break_start: nowIso,
+        break_slot_index: k,
       });
     if (breakError) return errorResponse(breakError.message, 400);
 
@@ -206,6 +250,7 @@ Deno.serve(async req => {
 
   let maxDurationMinutes = 0;
   for (const row of activeBreaks) {
+    // duration_minutes: trigger caps to slot; value here is a hint for response payload only
     const durationMinutes = Math.max(0, Math.round((Date.now() - new Date(row.break_start).getTime()) / 60000));
     maxDurationMinutes = Math.max(maxDurationMinutes, durationMinutes);
     const { error: endBreakError } = await supabase
