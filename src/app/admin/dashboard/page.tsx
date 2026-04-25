@@ -3020,6 +3020,8 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     const [saving, setSaving] = useState(false);
     const [weekOffset, setWeekOffset] = useState(0);
     const [deleteId, setDeleteId] = useState<string | null>(null);
+    const [deleteError, setDeleteError] = useState('');
+    const [deletingShift, setDeletingShift] = useState(false);
 
     const activeStaff = staffList.filter(s => s.active && s.role === 'staff');
 
@@ -3126,17 +3128,20 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     async function saveShiftDef(e: React.FormEvent) {
         e.preventDefault();
         setFormError('');
-        if (!form.staff_id) {
-            setFormError('Please select a staff member.');
-            return;
-        }
-        if (!form.shift_date) {
-            setFormError('Please select a shift date.');
-            return;
-        }
-        if (hasAssignmentConflict(form.staff_id, form.shift_date, form.start_time, form.end_time, editingAssignment?.id, formDateAssignments)) {
-            setFormError('Selected staff already has an overlapping shift on this date.');
-            return;
+        const isDefinitionEditMode = Boolean(editingShift && !editingAssignment);
+        if (!isDefinitionEditMode) {
+            if (!form.staff_id) {
+                setFormError('Please select a staff member.');
+                return;
+            }
+            if (!form.shift_date) {
+                setFormError('Please select a shift date.');
+                return;
+            }
+            if (hasAssignmentConflict(form.staff_id, form.shift_date, form.start_time, form.end_time, editingAssignment?.id, formDateAssignments)) {
+                setFormError('Selected staff already has an overlapping shift on this date.');
+                return;
+            }
         }
         setSaving(true);
         const payload = {
@@ -3172,29 +3177,31 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                 shiftDefinitionId = data.id;
             }
 
-            const assignmentPayload = {
-                shift_definition_id: shiftDefinitionId,
-                staff_id: form.staff_id,
-                shift_date: form.shift_date,
-                break_minutes_allowed: Math.max(0, Math.floor(form.break_minutes_allowed)),
-            };
+            if (!isDefinitionEditMode) {
+                const assignmentPayload = {
+                    shift_definition_id: shiftDefinitionId,
+                    staff_id: form.staff_id,
+                    shift_date: form.shift_date,
+                    break_minutes_allowed: Math.max(0, Math.floor(form.break_minutes_allowed)),
+                };
 
-            if (editingAssignment) {
-                const { error } = await supabase
-                    .from('shift_assignments')
-                    .update(assignmentPayload)
-                    .eq('id', editingAssignment.id);
-                if (error) {
-                    setFormError(error.message);
-                    setSaving(false);
-                    return;
-                }
-            } else {
-                const { error } = await supabase.from('shift_assignments').insert(assignmentPayload);
-                if (error) {
-                    setFormError(error.message);
-                    setSaving(false);
-                    return;
+                if (editingAssignment) {
+                    const { error } = await supabase
+                        .from('shift_assignments')
+                        .update(assignmentPayload)
+                        .eq('id', editingAssignment.id);
+                    if (error) {
+                        setFormError(error.message);
+                        setSaving(false);
+                        return;
+                    }
+                } else {
+                    const { error } = await supabase.from('shift_assignments').insert(assignmentPayload);
+                    if (error) {
+                        setFormError(error.message);
+                        setSaving(false);
+                        return;
+                    }
                 }
             }
         } finally {
@@ -3215,10 +3222,19 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     }
 
     async function deleteShiftDef(id: string) {
-        await supabase.from('shift_definitions').delete().eq('id', id);
+        if (!id) return;
+        setDeleteError('');
+        setDeletingShift(true);
+        const { error } = await supabase.from('shift_definitions').delete().eq('id', id);
+        if (error) {
+            setDeleteError(error.message || 'Could not delete shift.');
+            setDeletingShift(false);
+            return;
+        }
+        if (selectedShiftId === id) setSelectedShiftId(null);
         setDeleteId(null);
-        fetchShiftDefs();
-        fetchAssignments();
+        await Promise.all([fetchShiftDefs(), fetchAssignments()]);
+        setDeletingShift(false);
     }
 
     async function toggleAssignment(shiftDefId: string, staffId: string, date: string) {
@@ -3242,6 +3258,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
 
     function openCreateShiftForm() {
         setFormError('');
+        setDeleteError('');
         setShowForm(true);
         setEditingShift(null);
         setEditingAssignment(null);
@@ -3274,6 +3291,29 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             late_tolerance_minutes: shift.late_tolerance_minutes ?? 30,
             block_outside_window: shift.block_outside_window ?? false,
             published: shift.published ?? false
+        });
+        setShowForm(true);
+    }
+
+    function openEditShiftForm(shift: ShiftDefinition) {
+        setFormError('');
+        setEditingAssignment(null);
+        setEditingShift(shift);
+        setForm({
+            name: shift.name,
+            start_time: shift.start_time.slice(0, 5),
+            end_time: shift.end_time.slice(0, 5),
+            color: shift.color,
+            shift_type: shift.shift_type || 'normal',
+            shift_date: new Date().toISOString().slice(0, 10),
+            staff_id: '',
+            break_minutes_allowed: 60,
+            early_checkin_minutes: shift.early_checkin_minutes,
+            late_grace_minutes: shift.late_grace_minutes,
+            early_checkout_minutes: shift.early_checkout_minutes,
+            late_tolerance_minutes: shift.late_tolerance_minutes,
+            block_outside_window: shift.block_outside_window,
+            published: shift.published,
         });
         setShowForm(true);
     }
@@ -3395,7 +3435,8 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             <span style={{ width: 12, height: 12, borderRadius: '50%', background: sd.color, flexShrink: 0 }} />
                             <span style={{ color: '#fff', fontSize: 14, fontWeight: 700, flex: 1 }}>{sd.name}</span>
                             <div style={{ display: 'flex', gap: 4 }}>
-                                <button onClick={e => { e.stopPropagation(); setDeleteId(sd.id); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>🗑️</button>
+                                <button onClick={e => { e.stopPropagation(); openEditShiftForm(sd); }} title="Edit shift" style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>✏️</button>
+                                <button onClick={e => { e.stopPropagation(); setDeleteError(''); setDeleteId(sd.id); }} title="Delete shift" style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12, padding: 4 }}>🗑️</button>
                             </div>
                         </div>
                         <div style={{ display: 'flex', gap: 12, fontSize: 12, color: '#888' }}>
@@ -3604,7 +3645,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                 <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20, overflowY: 'auto' }}>
                     <div className="card" style={{ maxWidth: 520, width: '100%', padding: 24, margin: 'auto' }}>
                         <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
-                            {editingAssignment ? '✏️ Edit Shift Assignment' : '📅 New Shift Assignment'}
+                            {editingShift && !editingAssignment ? '✏️ Edit Shift' : editingAssignment ? '✏️ Edit Shift Assignment' : '📅 New Shift Assignment'}
                         </h3>
                         <form onSubmit={saveShiftDef}>
                             {/* Name + Type */}
@@ -3636,36 +3677,40 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             </div>
 
                             {/* Date + Staff */}
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                                <div>
-                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Date</label>
-                                    <input className="input-field" type="date" value={form.shift_date} onChange={e => setForm({ ...form, shift_date: e.target.value })} required />
+                            {!(editingShift && !editingAssignment) && (
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                                    <div>
+                                        <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Date</label>
+                                        <input className="input-field" type="date" value={form.shift_date} onChange={e => setForm({ ...form, shift_date: e.target.value })} required />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Staff</label>
+                                        <select className="input-field" value={form.staff_id} onChange={e => setForm({ ...form, staff_id: e.target.value })} required style={{ colorScheme: 'dark' }}>
+                                            <option value="">Select available staff</option>
+                                            {availableStaff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                        </select>
+                                    </div>
                                 </div>
-                                <div>
-                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Staff</label>
-                                    <select className="input-field" value={form.staff_id} onChange={e => setForm({ ...form, staff_id: e.target.value })} required style={{ colorScheme: 'dark' }}>
-                                        <option value="">Select available staff</option>
-                                        {availableStaff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                    </select>
-                                </div>
-                            </div>
+                            )}
 
                             {/* Break Budget */}
-                            <div style={{ background: '#111', borderRadius: 12, padding: '12px 14px', marginBottom: 12, border: '1px solid #2a2a2a' }}>
-                                <label style={{ fontSize: 12, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Max Break Time (min)</label>
-                                <input
-                                    className="input-field"
-                                    type="number"
-                                    min={0}
-                                    max={300}
-                                    value={form.break_minutes_allowed}
-                                    onChange={e => setForm({ ...form, break_minutes_allowed: Number(e.target.value) })}
-                                    style={{ padding: '8px 10px', fontSize: 13, maxWidth: 140 }}
-                                />
-                                <p style={{ color: '#666', fontSize: 11, margin: '8px 0 0' }}>
-                                    Staff can start/stop break multiple times until this total reaches 0.
-                                </p>
-                            </div>
+                            {!(editingShift && !editingAssignment) && (
+                                <div style={{ background: '#111', borderRadius: 12, padding: '12px 14px', marginBottom: 12, border: '1px solid #2a2a2a' }}>
+                                    <label style={{ fontSize: 12, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Max Break Time (min)</label>
+                                    <input
+                                        className="input-field"
+                                        type="number"
+                                        min={0}
+                                        max={300}
+                                        value={form.break_minutes_allowed}
+                                        onChange={e => setForm({ ...form, break_minutes_allowed: Number(e.target.value) })}
+                                        style={{ padding: '8px 10px', fontSize: 13, maxWidth: 140 }}
+                                    />
+                                    <p style={{ color: '#666', fontSize: 11, margin: '8px 0 0' }}>
+                                        Staff can start/stop break multiple times until this total reaches 0.
+                                    </p>
+                                </div>
+                            )}
 
                             {/* Time Window Policy */}
                             <div style={{ background: '#111', borderRadius: 12, padding: '14px 16px', marginBottom: 12, border: '1px solid #2a2a2a' }}>
@@ -3717,7 +3762,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
 
                             <div style={{ display: 'flex', gap: 8 }}>
                                 <button type="submit" className="btn-primary" disabled={saving} style={{ flex: 1, padding: 12 }}>
-                                    {saving ? 'Saving...' : editingAssignment ? '💾 Update Shift' : '📅 Create Shift'}
+                                    {saving ? 'Saving...' : editingShift && !editingAssignment ? '💾 Save Shift' : editingAssignment ? '💾 Update Shift' : '📅 Create Shift'}
                                 </button>
                                 <button type="button" onClick={() => { setShowForm(false); setEditingShift(null); setEditingAssignment(null); setFormError(''); }} className="btn-secondary" style={{ padding: '12px 20px' }}>Cancel</button>
                             </div>
@@ -3733,9 +3778,10 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                         <p style={{ fontSize: 32, marginBottom: 8 }}>🗑️</p>
                         <p style={{ color: '#fff', fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Delete this shift?</p>
                         <p style={{ color: '#888', fontSize: 12, marginBottom: 16 }}>All assignments for this shift will also be removed.</p>
+                        {deleteError && <p style={{ color: '#ef4444', fontSize: 12, margin: '0 0 10px' }}>{deleteError}</p>}
                         <div style={{ display: 'flex', gap: 8 }}>
-                            <button onClick={() => deleteShiftDef(deleteId)} style={{ flex: 1, padding: 12, background: '#ef4444', border: 'none', borderRadius: 10, color: '#fff', fontWeight: 600, cursor: 'pointer' }}>Delete</button>
-                            <button onClick={() => setDeleteId(null)} className="btn-secondary" style={{ flex: 1, padding: 12 }}>Cancel</button>
+                            <button onClick={() => deleteShiftDef(deleteId)} disabled={deletingShift} style={{ flex: 1, padding: 12, background: '#ef4444', border: 'none', borderRadius: 10, color: '#fff', fontWeight: 600, cursor: deletingShift ? 'not-allowed' : 'pointer', opacity: deletingShift ? 0.7 : 1 }}>{deletingShift ? 'Deleting...' : 'Delete'}</button>
+                            <button onClick={() => { setDeleteId(null); setDeleteError(''); }} className="btn-secondary" style={{ flex: 1, padding: 12 }}>Cancel</button>
                         </div>
                     </div>
                 </div>
