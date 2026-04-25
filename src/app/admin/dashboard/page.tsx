@@ -3129,16 +3129,31 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         e.preventDefault();
         setFormError('');
         const isDefinitionEditMode = Boolean(editingShift && !editingAssignment);
-        if (!isDefinitionEditMode) {
-            if (!form.staff_id) {
-                setFormError('Please select a staff member.');
+        if (isDefinitionEditMode && Boolean(form.staff_id) !== Boolean(form.shift_date)) {
+            setFormError('Select both a staff member and a date to add or update an assignment, or clear both to only update the shift template.');
+            return;
+        }
+        const wantsAssignment = !isDefinitionEditMode || Boolean(form.staff_id && form.shift_date);
+        if (wantsAssignment) {
+            if (!form.staff_id || !form.shift_date) {
+                setFormError('Please select a staff member and shift date.');
                 return;
             }
-            if (!form.shift_date) {
-                setFormError('Please select a shift date.');
-                return;
-            }
-            if (hasAssignmentConflict(form.staff_id, form.shift_date, form.start_time, form.end_time, editingAssignment?.id, formDateAssignments)) {
+            const ignoreId =
+                editingAssignment?.id
+                ?? assignments.find(
+                    a =>
+                        a.shift_definition_id === (editingAssignment?.shift_definition_id || editingShift?.id || '')
+                        && a.staff_id === form.staff_id
+                        && a.shift_date === form.shift_date,
+                )?.id
+                ?? formDateAssignments.find(
+                    a =>
+                        a.shift_definition_id === (editingAssignment?.shift_definition_id || editingShift?.id || '')
+                        && a.staff_id === form.staff_id
+                        && a.shift_date === form.shift_date,
+                )?.id;
+            if (hasAssignmentConflict(form.staff_id, form.shift_date, form.start_time, form.end_time, ignoreId, formDateAssignments)) {
                 setFormError('Selected staff already has an overlapping shift on this date.');
                 return;
             }
@@ -3177,7 +3192,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                 shiftDefinitionId = data.id;
             }
 
-            if (!isDefinitionEditMode) {
+            if (wantsAssignment && shiftDefinitionId) {
                 const assignmentPayload = {
                     shift_definition_id: shiftDefinitionId,
                     staff_id: form.staff_id,
@@ -3185,11 +3200,29 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                     break_minutes_allowed: Math.max(0, Math.floor(form.break_minutes_allowed)),
                 };
 
-                if (editingAssignment) {
+                let targetAssignmentId = editingAssignment?.id ?? null;
+                if (!targetAssignmentId) {
+                    const match =
+                        assignments.find(
+                            a =>
+                                a.shift_definition_id === shiftDefinitionId
+                                && a.staff_id === form.staff_id
+                                && a.shift_date === form.shift_date,
+                        )
+                        ?? formDateAssignments.find(
+                            a =>
+                                a.shift_definition_id === shiftDefinitionId
+                                && a.staff_id === form.staff_id
+                                && a.shift_date === form.shift_date,
+                        );
+                    targetAssignmentId = match?.id ?? null;
+                }
+
+                if (targetAssignmentId) {
                     const { error } = await supabase
                         .from('shift_assignments')
                         .update(assignmentPayload)
-                        .eq('id', editingAssignment.id);
+                        .eq('id', targetAssignmentId);
                     if (error) {
                         setFormError(error.message);
                         setSaving(false);
@@ -3305,7 +3338,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             end_time: shift.end_time.slice(0, 5),
             color: shift.color,
             shift_type: shift.shift_type || 'normal',
-            shift_date: new Date().toISOString().slice(0, 10),
+            shift_date: '',
             staff_id: '',
             break_minutes_allowed: 60,
             early_checkin_minutes: shift.early_checkin_minutes,
@@ -3644,9 +3677,14 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
             {showForm && (
                 <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20, overflowY: 'auto' }}>
                     <div className="card" style={{ maxWidth: 520, width: '100%', padding: 24, margin: 'auto' }}>
-                        <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
+                        <h3 style={{ color: '#fff', fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
                             {editingShift && !editingAssignment ? '✏️ Edit Shift' : editingAssignment ? '✏️ Edit Shift Assignment' : '📅 New Shift Assignment'}
                         </h3>
+                        {editingShift && !editingAssignment && (
+                            <p style={{ color: '#777', fontSize: 12, margin: '0 0 16px', lineHeight: 1.45 }}>
+                                Times and policy apply to every day this shift is used. Pick staff and date below to add or update that day&apos;s assignment and break budget—or leave them empty to only update the template.
+                            </p>
+                        )}
                         <form onSubmit={saveShiftDef}>
                             {/* Name + Type */}
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, marginBottom: 12 }}>
@@ -3677,40 +3715,51 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             </div>
 
                             {/* Date + Staff */}
-                            {!(editingShift && !editingAssignment) && (
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                                    <div>
-                                        <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Date</label>
-                                        <input className="input-field" type="date" value={form.shift_date} onChange={e => setForm({ ...form, shift_date: e.target.value })} required />
-                                    </div>
-                                    <div>
-                                        <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Staff</label>
-                                        <select className="input-field" value={form.staff_id} onChange={e => setForm({ ...form, staff_id: e.target.value })} required style={{ colorScheme: 'dark' }}>
-                                            <option value="">Select available staff</option>
-                                            {availableStaff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                        </select>
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Break Budget */}
-                            {!(editingShift && !editingAssignment) && (
-                                <div style={{ background: '#111', borderRadius: 12, padding: '12px 14px', marginBottom: 12, border: '1px solid #2a2a2a' }}>
-                                    <label style={{ fontSize: 12, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Max Break Time (min)</label>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Shift Date</label>
                                     <input
                                         className="input-field"
-                                        type="number"
-                                        min={0}
-                                        max={300}
-                                        value={form.break_minutes_allowed}
-                                        onChange={e => setForm({ ...form, break_minutes_allowed: Number(e.target.value) })}
-                                        style={{ padding: '8px 10px', fontSize: 13, maxWidth: 140 }}
+                                        type="date"
+                                        value={form.shift_date}
+                                        onChange={e => setForm({ ...form, shift_date: e.target.value })}
+                                        required={!Boolean(editingShift && !editingAssignment)}
                                     />
-                                    <p style={{ color: '#666', fontSize: 11, margin: '8px 0 0' }}>
-                                        Staff can start/stop break multiple times until this total reaches 0.
-                                    </p>
                                 </div>
-                            )}
+                                <div>
+                                    <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Staff</label>
+                                    <select
+                                        className="input-field"
+                                        value={form.staff_id}
+                                        onChange={e => setForm({ ...form, staff_id: e.target.value })}
+                                        required={!Boolean(editingShift && !editingAssignment)}
+                                        style={{ colorScheme: 'dark' }}
+                                    >
+                                        <option value="">{editingShift && !editingAssignment ? '— Optional —' : 'Select available staff'}</option>
+                                        {availableStaff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Break Budget */}
+                            <div style={{ background: '#111', borderRadius: 12, padding: '12px 14px', marginBottom: 12, border: '1px solid #2a2a2a', opacity: editingShift && !editingAssignment && !(form.staff_id && form.shift_date) ? 0.55 : 1 }}>
+                                <label style={{ fontSize: 12, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Max Break Time (min)</label>
+                                <input
+                                    className="input-field"
+                                    type="number"
+                                    min={0}
+                                    max={300}
+                                    value={form.break_minutes_allowed}
+                                    onChange={e => setForm({ ...form, break_minutes_allowed: Number(e.target.value) })}
+                                    disabled={Boolean(editingShift && !editingAssignment && !(form.staff_id && form.shift_date))}
+                                    style={{ padding: '8px 10px', fontSize: 13, maxWidth: 140 }}
+                                />
+                                <p style={{ color: '#666', fontSize: 11, margin: '8px 0 0' }}>
+                                    {editingShift && !editingAssignment && !(form.staff_id && form.shift_date)
+                                        ? 'Choose staff and date above to set break minutes for that assignment.'
+                                        : 'Staff can start/stop break multiple times until this total reaches 0.'}
+                                </p>
+                            </div>
 
                             {/* Time Window Policy */}
                             <div style={{ background: '#111', borderRadius: 12, padding: '14px 16px', marginBottom: 12, border: '1px solid #2a2a2a' }}>
