@@ -211,22 +211,27 @@ export default function StaffDashboard() {
         let shiftAssignments = null;
         
         if (currentOpenLog) {
-            const { data } = await supabase
+            const { data, error } = await supabase
                 .from('shift_assignments')
                 .select('id, shift_date, break_minutes_allowed, break_slot_minutes, shift_definition:shift_definitions(id, name, start_time, end_time, color, early_checkin_minutes, late_grace_minutes, block_outside_window)')
                 .eq('time_log_id', currentOpenLog.id)
                 .limit(1);
+            if (error) console.error("Error fetching shift by time_log_id:", error);
             shiftAssignments = data;
         }
 
         if (!shiftAssignments || shiftAssignments.length === 0) {
-            const { data } = await supabase
+            const { data, error } = await supabase
                 .from('shift_assignments')
                 .select('id, shift_date, break_minutes_allowed, break_slot_minutes, shift_definition:shift_definitions(id, name, start_time, end_time, color, early_checkin_minutes, late_grace_minutes, block_outside_window)')
                 .eq('staff_id', session.staff.id)
                 .eq('shift_date', todayBogota)
                 .order('created_at', { ascending: false })
                 .limit(1);
+            if (error) {
+                console.error("Error fetching shift by staff_id + date:", error);
+                setAlerts(prev => [...prev, `DB Error: ${error.message}`]);
+            }
             shiftAssignments = data;
         }
         
