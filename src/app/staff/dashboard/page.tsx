@@ -465,7 +465,7 @@ export default function StaffDashboard() {
         return () => {
             cancelled = true;
         };
-    }, [activeBreak, activeSlotMaxSeconds, openLog, syncBreakState]);
+    }, [activeBreak, activeSlotMaxSeconds, openLog, syncBreakState, breakTimer]);
 
     const fetchAllTasks = useCallback(async () => {
         if (!session) return;
