@@ -148,9 +148,12 @@ export async function clockAction(
     });
 
     const { payload, message } = await parseFunctionResponse(res);
+    console.log("clockAction HTTP status:", res.status);
+    console.log("clockAction payload:", payload);
+    console.log("clockAction message:", message);
 
     if (!res.ok) {
-      return { success: false, error: (payload.error as string) || message || 'Action failed.' };
+      return { success: false, error: (payload.error as string) || (payload.message as string) || message || 'Action failed.' };
     }
 
     return { success: true, data: payload };
