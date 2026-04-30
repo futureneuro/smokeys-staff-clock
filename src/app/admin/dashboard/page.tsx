@@ -3812,6 +3812,9 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                 </div>
             </div>
 
+            {/* Default Break Templates Configuration */}
+            <DefaultBreakConfigCard />
+
             {showForm && (
                 <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20, overflowY: 'auto' }}>
                     <div className="card" style={{ maxWidth: 520, width: '100%', padding: 24, margin: 'auto' }}>
@@ -4378,9 +4381,6 @@ function SettingsPanel() {
 
                 {/* AI Configuration */}
                 <AIConfigCard />
-                
-                {/* Default Break Templates */}
-                <DefaultBreakConfigCard />
             </div>
         </div>
     );
