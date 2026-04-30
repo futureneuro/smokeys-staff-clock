@@ -3025,6 +3025,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     const [editingAssignment, setEditingAssignment] = useState<ShiftAssignment | null>(null);
     const [formError, setFormError] = useState('');
     const [shiftFormMultiHint, setShiftFormMultiHint] = useState<string | null>(null);
+    const [defaultBreaks, setDefaultBreaks] = useState<{ short: number[]; medium: number[]; long: number[] }>({ short: [15], medium: [30], long: [30, 30] });
     const [form, setForm] = useState({
         name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427',
         shift_type: 'normal',
@@ -3049,6 +3050,26 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     function toMinutes(time: string): number {
         const [hours, mins] = (time || '00:00').split(':').map(Number);
         return ((Number.isFinite(hours) ? hours : 0) * 60) + (Number.isFinite(mins) ? mins : 0);
+    }
+
+    function handleTimeChange(field: 'start_time' | 'end_time', value: string) {
+        const updatedForm = { ...form, [field]: value };
+        
+        // Auto-apply defaults if creating a new shift
+        if (!editingShift) {
+            const startMins = toMinutes(updatedForm.start_time);
+            const endMins = toMinutes(updatedForm.end_time);
+            const durationMins = endMins >= startMins ? endMins - startMins : (24 * 60 - startMins) + endMins;
+            const durationHours = durationMins / 60;
+
+            let defaultSlots = defaultBreaks.short;
+            if (durationHours > 8) defaultSlots = defaultBreaks.long;
+            else if (durationHours >= 4) defaultSlots = defaultBreaks.medium;
+
+            updatedForm.break_slot_minutes = [...defaultSlots];
+        }
+
+        setForm(updatedForm);
     }
 
     function normalizeTimeRanges(startTime: string, endTime: string): Array<{ start: number; end: number }> {
@@ -3130,8 +3151,20 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         if (data) setAssignments(data);
     }, [weekStart, weekEnd]);
 
+    const loadBreakSettings = useCallback(async () => {
+        const { data } = await supabase.from('settings').select('default_break_short, default_break_medium, default_break_long').limit(1).single();
+        if (data) {
+            setDefaultBreaks({
+                short: data.default_break_short || [15],
+                medium: data.default_break_medium || [30],
+                long: data.default_break_long || [30, 30],
+            });
+        }
+    }, []);
+
     useEffect(() => { fetchShiftDefs(); }, [fetchShiftDefs]);
     useEffect(() => { fetchAssignments(); }, [fetchAssignments]);
+    useEffect(() => { loadBreakSettings(); }, [loadBreakSettings]);
     useEffect(() => {
         if (!showForm || !form.shift_date) {
             setFormDateAssignments([]);
@@ -3816,11 +3849,11 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
                                 <div>
                                     <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>Start Time</label>
-                                    <input className="input-field" type="time" value={form.start_time} onChange={e => setForm({ ...form, start_time: e.target.value })} required style={{ colorScheme: 'dark' }} />
+                                    <input className="input-field" type="time" value={form.start_time} onChange={e => handleTimeChange('start_time', e.target.value)} required style={{ colorScheme: 'dark' }} />
                                 </div>
                                 <div>
                                     <label style={{ fontSize: 12, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 6 }}>End Time</label>
-                                    <input className="input-field" type="time" value={form.end_time} onChange={e => setForm({ ...form, end_time: e.target.value })} required style={{ colorScheme: 'dark' }} />
+                                    <input className="input-field" type="time" value={form.end_time} onChange={e => handleTimeChange('end_time', e.target.value)} required style={{ colorScheme: 'dark' }} />
                                 </div>
                             </div>
 
@@ -4345,6 +4378,9 @@ function SettingsPanel() {
 
                 {/* AI Configuration */}
                 <AIConfigCard />
+                
+                {/* Default Break Templates */}
+                <DefaultBreakConfigCard />
             </div>
         </div>
     );
@@ -4468,6 +4504,115 @@ function AIConfigCard() {
         </div>
     );
 }
+
+function DefaultBreakConfigCard() {
+    const [shortBreaks, setShortBreaks] = useState<number[]>([15]);
+    const [mediumBreaks, setMediumBreaks] = useState<number[]>([30]);
+    const [longBreaks, setLongBreaks] = useState<number[]>([30, 30]);
+    const [saving, setSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+
+    useEffect(() => {
+        loadSettings();
+    }, []);
+
+    async function loadSettings() {
+        const { data } = await supabase.from('settings').select('default_break_short, default_break_medium, default_break_long').limit(1).single();
+        if (data) {
+            setShortBreaks(data.default_break_short || [15]);
+            setMediumBreaks(data.default_break_medium || [30]);
+            setLongBreaks(data.default_break_long || [30, 30]);
+        }
+    }
+
+    async function handleSave() {
+        setSaving(true);
+        setSaved(false);
+        const { data: existing } = await supabase.from('settings').select('id').limit(1).single();
+        
+        const updateData = {
+            default_break_short: shortBreaks.filter(m => Number.isFinite(m) && m > 0),
+            default_break_medium: mediumBreaks.filter(m => Number.isFinite(m) && m > 0),
+            default_break_long: longBreaks.filter(m => Number.isFinite(m) && m > 0),
+        };
+
+        if (existing) {
+            await supabase.from('settings').update(updateData).eq('id', existing.id);
+        } else {
+            await supabase.from('settings').insert(updateData);
+        }
+        setSaving(false);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 3000);
+    }
+
+    function renderBreakConfig(label: string, description: string, breaks: number[], setBreaks: (val: number[]) => void) {
+        return (
+            <div style={{ background: '#111', borderRadius: 12, padding: '16px', marginBottom: 12, border: '1px solid #2a2a2a' }}>
+                <h4 style={{ fontSize: 13, fontWeight: 700, color: '#fff', margin: '0 0 6px' }}>{label}</h4>
+                <p style={{ color: '#888', fontSize: 12, margin: '0 0 12px' }}>{description}</p>
+                {breaks.map((mins, idx) => (
+                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                        <span style={{ color: '#888', fontSize: 12, minWidth: 60 }}>Period {idx + 1}</span>
+                        <input
+                            className="input-field"
+                            type="number"
+                            min={1}
+                            max={120}
+                            value={mins}
+                            onChange={e => {
+                                const next = [...breaks];
+                                next[idx] = Number(e.target.value);
+                                setBreaks(next);
+                            }}
+                            style={{ padding: '8px 10px', fontSize: 13, maxWidth: 100 }}
+                        />
+                        <span style={{ color: '#666', fontSize: 11 }}>min</span>
+                        <button
+                            type="button"
+                            className="btn-secondary"
+                            style={{ padding: '6px 10px', fontSize: 11 }}
+                            onClick={() => {
+                                const next = breaks.filter((_, i) => i !== idx);
+                                setBreaks(next.length > 0 ? next : []);
+                            }}
+                        >
+                            Remove
+                        </button>
+                    </div>
+                ))}
+                <button
+                    type="button"
+                    className="btn-secondary"
+                    style={{ padding: '8px 12px', fontSize: 12, marginBottom: 8, marginTop: 4 }}
+                    onClick={() => setBreaks([...breaks, 15])}
+                    disabled={breaks.length >= 20}
+                >
+                    + Add period
+                </button>
+            </div>
+        );
+    }
+
+    return (
+        <div style={{ marginTop: 32 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', marginBottom: 8 }}>☕ Default Break Templates</h2>
+            <p style={{ color: '#999', fontSize: 14, marginBottom: 20 }}>
+                Configure the default break periods automatically applied when creating new shifts.
+            </p>
+            <div className="card" style={{ padding: 24 }}>
+                {renderBreakConfig('Short Shift (< 4 hours)', 'Default breaks for shifts shorter than 4 hours.', shortBreaks, setShortBreaks)}
+                {renderBreakConfig('Medium Shift (4-8 hours)', 'Default breaks for shifts between 4 and 8 hours.', mediumBreaks, setMediumBreaks)}
+                {renderBreakConfig('Long Shift (> 8 hours)', 'Default breaks for shifts longer than 8 hours.', longBreaks, setLongBreaks)}
+                
+                <button onClick={handleSave} className="btn-primary" disabled={saving} style={{ width: 'auto', padding: '10px 20px', marginTop: 12 }}>
+                    {saving ? 'Saving...' : saved ? '✅ Saved!' : '💾 Save Break Templates'}
+                </button>
+            </div>
+        </div>
+    );
+}
+
 
 function QRCodePanel() {
     const [qrUrl, setQrUrl] = useState('');
