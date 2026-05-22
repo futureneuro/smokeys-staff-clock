@@ -91,7 +91,7 @@ export default function AdminDashboard() {
     const fetchLogs = useCallback(async () => {
         let query = supabase
             .from('time_logs')
-            .select('*, staff(*)')
+            .select('*, staff!staff_id(*)')
             .order('check_in', { ascending: false })
             .limit(200);
 
@@ -100,7 +100,13 @@ export default function AdminDashboard() {
         if (dateFrom) query = query.gte('check_in', dateFrom + 'T00:00:00-05:00');
         if (dateTo) query = query.lte('check_in', dateTo + 'T23:59:59-05:00');
 
-        const { data } = await query;
+        const { data, error } = await query;
+        if (error) {
+            console.error('fetchLogs failed:', error);
+            alert(`Failed to load time logs: ${error.message}`);
+            setTimeLogs([]);
+            return;
+        }
         if (data) setTimeLogs(data);
     }, [filterStaffId, dateFrom, dateTo]);
 
@@ -345,7 +351,7 @@ export default function AdminDashboard() {
 
         let query = supabase
             .from('time_logs')
-            .select('*, staff(*)')
+            .select('*, staff!staff_id(*)')
             .order('check_in', { ascending: false });
 
         if (filterStaffId) query = query.eq('staff_id', filterStaffId);
