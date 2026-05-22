@@ -407,7 +407,9 @@ export default function AdminDashboard() {
             ];
         });
 
-        const csv = '﻿' + [headers, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
+        // 'sep=,' directive forces Excel to use comma delimiter even in locales (e.g. es-CO)
+        // where the default list separator is ';' — otherwise the whole row lands in column A.
+        const csv = '﻿sep=,\r\n' + [headers, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
         const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
