@@ -96,8 +96,9 @@ export default function AdminDashboard() {
             .limit(200);
 
         if (filterStaffId) query = query.eq('staff_id', filterStaffId);
-        if (dateFrom) query = query.gte('check_in', dateFrom);
-        if (dateTo) query = query.lte('check_in', dateTo + 'T23:59:59');
+        // Bogota is UTC-5 (no DST). Append offset so timestamptz compare matches local calendar day.
+        if (dateFrom) query = query.gte('check_in', dateFrom + 'T00:00:00-05:00');
+        if (dateTo) query = query.lte('check_in', dateTo + 'T23:59:59-05:00');
 
         const { data } = await query;
         if (data) setTimeLogs(data);
@@ -326,24 +327,88 @@ export default function AdminDashboard() {
         setShowStaffForm(true);
     }
 
-    function exportCSV() {
-        const headers = ['Staff ID', 'Staff Name', 'Date', 'Check In', 'Check Out', 'Total Hours', 'GPS', 'IP'];
-        const rows = timeLogs.map(log => {
-            const s = log.staff as unknown as Staff;
+    async function exportCSV() {
+        const BOGOTA_TZ = 'America/Bogota';
+        const dateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: BOGOTA_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+        const timeFmt = new Intl.DateTimeFormat('en-GB', { timeZone: BOGOTA_TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        const fmtDate = (iso: string | null) => (iso ? dateFmt.format(new Date(iso)) : '');
+        const fmtTime = (iso: string | null) => (iso ? timeFmt.format(new Date(iso)) : '');
+
+        // CSV-safe: escape quotes; prefix '=','+','-','@' to neutralize formula injection,
+        // but skip the prefix on plain numeric values so Excel still treats them as numbers.
+        const isNumeric = (s: string) => /^[+-]?\d+(\.\d+)?$/.test(s);
+        const esc = (v: unknown) => {
+            const s = v === null || v === undefined ? '' : String(v);
+            const safe = /^[=+\-@]/.test(s) && !isNumeric(s) ? `'${s}` : s;
+            return `"${safe.replace(/"/g, '""')}"`;
+        };
+
+        let query = supabase
+            .from('time_logs')
+            .select('*, staff(*)')
+            .order('check_in', { ascending: false });
+
+        if (filterStaffId) query = query.eq('staff_id', filterStaffId);
+        if (dateFrom) query = query.gte('check_in', dateFrom + 'T00:00:00-05:00');
+        if (dateTo) query = query.lte('check_in', dateTo + 'T23:59:59-05:00');
+
+        const { data: logs, error } = await query;
+        if (error) {
+            alert(`Failed to load logs for export: ${error.message}`);
+            return;
+        }
+        if (!logs || logs.length === 0) {
+            alert('No time logs match the current filters.');
+            return;
+        }
+
+        const logIds = logs.map(l => l.id);
+        const { data: breakRows } = await supabase
+            .from('breaks')
+            .select('time_log_id, break_start, break_end, duration_minutes')
+            .in('time_log_id', logIds)
+            .order('break_start', { ascending: true });
+
+        const breaksByLog = new Map<string, { break_start: string; break_end: string | null; duration_minutes: number | null }[]>();
+        (breakRows || []).forEach(b => {
+            const arr = breaksByLog.get(b.time_log_id) || [];
+            arr.push(b);
+            breaksByLog.set(b.time_log_id, arr);
+        });
+
+        const headers = [
+            'Staff Code', 'Staff Name', 'Staff ID',
+            'Date (Bogota)', 'Check In (Bogota)', 'Check Out (Bogota)',
+            'Total Hours', 'Break Count', 'Total Break Minutes', 'Break Details',
+            'GPS Lat', 'GPS Lng', 'IP',
+        ];
+
+        const rows = logs.map(log => {
+            const s = log.staff as unknown as Staff | null;
+            const brks = breaksByLog.get(log.id) || [];
+            const totalBreakMin = brks.reduce((sum, b) => sum + (b.duration_minutes || 0), 0);
+            const breakDetails = brks
+                .map(b => `${fmtTime(b.break_start)}-${b.break_end ? fmtTime(b.break_end) : 'open'} (${b.duration_minutes ?? '?'}m)`)
+                .join(' | ');
             return [
                 s?.staff_code || '',
                 s?.name || '',
-                new Date(log.check_in).toLocaleDateString(),
-                new Date(log.check_in).toLocaleTimeString(),
-                log.check_out ? new Date(log.check_out).toLocaleTimeString() : 'Still In',
-                log.total_hours?.toFixed(2) || '-',
-                `${log.gps_lat},${log.gps_lng}`,
+                log.staff_id,
+                fmtDate(log.check_in),
+                fmtTime(log.check_in),
+                log.check_out ? fmtTime(log.check_out) : 'Still In',
+                log.total_hours != null ? log.total_hours.toFixed(2) : '',
+                brks.length,
+                totalBreakMin,
+                breakDetails,
+                log.gps_lat ?? '',
+                log.gps_lng ?? '',
                 log.ip_address || '',
             ];
         });
 
-        const csv = [headers, ...rows].map(r => r.map(c => `"${c}"`).join(',')).join('\n');
-        const blob = new Blob([csv], { type: 'text/csv' });
+        const csv = '﻿' + [headers, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
