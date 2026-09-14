@@ -144,6 +144,103 @@ const translations: Record<Lang, Record<string, string>> = {
         profileRole: 'Role',
         profileStaffId: 'Staff ID',
         profileLogout: 'LOG OUT',
+
+        // Task proof photos
+        proofRequired: 'Photo required',
+        proofDone: 'Photo attached',
+        proofHint: 'This task needs a photo showing the work is done before it can be completed.',
+        proofTake: '📸 Take photo',
+        proofRetake: 'Replace photo',
+        proofUploading: 'Uploading…',
+        proofPhoto: 'Proof photo',
+        proofRequiredError: 'Add the photo first, then mark it complete.',
+        proofBadge: 'Needs photo',
+
+        // ── Inventory: counts and waste ──
+    countsTitle: 'Stock counts',
+    countsIntro: 'Count what is physically there, and the system compares it against what it expected.',
+    countsThresholds: 'Alerts fire when an item is short by more than {pct}% and {value}.',
+    newCount: '+ New count',
+    noCounts: 'No counts yet. The first one sets the baseline, so nothing is flagged until the second.',
+    colDate: 'DATE',
+    colArea: 'AREA',
+    colItems: 'ITEMS',
+    colNeedsLook: 'NEEDS A LOOK',
+    colShortfall: 'SHORTFALL',
+    colNote: 'NOTE',
+    view: 'View',
+
+    countSheetTitle: 'Count the stock',
+    countSheetIntro: 'Write down what you actually find. Leave an item blank to skip it.',
+    countBlindNote: 'The expected figure is hidden on purpose — that is what makes the count worth doing.',
+    dateCounted: 'DATE COUNTED *',
+    area: 'AREA',
+    everywhere: 'Everywhere',
+    whoNote: 'WHO / NOTE',
+    whoPlaceholder: 'Carlos — kitchen',
+    highPriority: '🔴 High priority',
+    mediumPriority: '🟡 Medium',
+    normalPriority: '⚪ Normal',
+    highPriorityHint: 'Proteins and other high-value items. If time is short, count only these.',
+    itemsCounted: '{n} item(s) counted',
+    notANumber: '{n} NOT A NUMBER',
+    saveCount: 'Save count and compare',
+    saving: 'Saving…',
+    cancel: 'Cancel',
+    systemSays: 'system says',
+    inUnit: 'in',
+    noItemsInArea: 'No counted items in this area.',
+
+    resultTitle: 'Count result',
+    resultIntro: 'Difference between what was found and what the system expected. Stock has been adjusted to match the count.',
+    back: 'Back',
+    statItems: 'ITEMS COUNTED',
+    statNeedsLook: 'NEEDS A LOOK',
+    statShortfall: 'SHORTFALL VALUE',
+    alertLine: '{n} item(s) are short by more than the alert threshold.',
+    alertAdvice: 'Before treating this as theft, check whether waste, staff meals or a missing purchase explain it.',
+    colExpected: 'EXPECTED',
+    colCounted: 'COUNTED',
+    colDifference: 'DIFFERENCE',
+    colValue: 'VALUE',
+    check: 'CHECK',
+
+    wasteTitle: 'Waste and adjustments',
+    wasteIntro: 'Anything that leaves stock without being sold. The POS has nowhere to record this, and without it every spoiled tomato shows up as a shortfall.',
+    wasteWhat: 'WHAT',
+    wasteChoose: '— choose an item —',
+    wasteHowMuch: 'HOW MUCH',
+    wasteReason: 'REASON',
+    wasteDate: 'DATE',
+    wasteNote: 'NOTE',
+    wasteNoteRequired: 'Required — explain the correction',
+    wasteNoteOptional: 'Optional',
+    wasteRecord: 'Record it',
+    wasteRecent: 'Recorded in the last 14 days',
+    wasteEmpty: 'Nothing recorded yet. If waste never gets logged, the count will keep reporting shortfalls that nobody can explain.',
+    wasteOpeningHint: 'Opening stock ADDS to the count. Use it once per item when starting out, to record what was already there.',
+    wasteStaffHint: 'Staff meals normally come from a separate shop. Only record it here if it actually came out of restaurant stock.',
+    wasteRecorded: 'Recorded {qty} of {item}.',
+    colItem: 'ITEM',
+    colQty: 'QUANTITY',
+    colReason: 'REASON',
+
+    reason_waste: 'Waste / spoiled',
+    reason_staff_meal: 'Staff meal',
+    reason_comp: 'Comped or remade',
+    reason_transfer_out: 'Moved elsewhere',
+    reason_adjustment: 'Manual correction',
+    reason_opening: 'Opening stock (adds)',
+
+    area_kitchen: 'Kitchen',
+    area_bar: 'Bar',
+    area_fridge: 'Fridge',
+    area_freezer: 'Freezer',
+    area_dry_store: 'Dry store',
+    area_other: 'Other',
+
+    loading: 'Loading…',
+        statusChangeFailed: 'Could not save the change. Check your connection and try again.',
     },
     es: {
         // Header
@@ -288,14 +385,117 @@ const translations: Record<Lang, Record<string, string>> = {
         profileRole: 'Rol',
         profileStaffId: 'ID de Empleado',
         profileLogout: 'CERRAR SESIÓN',
+
+        // Task proof photos
+        proofRequired: 'Se requiere foto',
+        proofDone: 'Foto adjuntada',
+        proofHint: 'Esta tarea necesita una foto que muestre el trabajo hecho antes de poder completarse.',
+        proofTake: '📸 Tomar foto',
+        proofRetake: 'Cambiar la foto',
+        proofUploading: 'Subiendo…',
+        proofPhoto: 'Foto de evidencia',
+        proofRequiredError: 'Primero suba la foto y luego marque la tarea como completada.',
+        proofBadge: 'Falta foto',
+
+        // ── Inventory: counts and waste ──
+    // Counts — list
+    countsTitle: 'Conteos de inventario',
+    countsIntro: 'Cuente lo que hay físicamente y el sistema lo compara con lo que esperaba.',
+    countsThresholds: 'Se avisa cuando falta más de {pct}% y más de {value}.',
+    newCount: '+ Nuevo conteo',
+    noCounts: 'Todavía no hay conteos. El primero fija la base, así que no se avisa nada hasta el segundo.',
+    colDate: 'FECHA',
+    colArea: 'ÁREA',
+    colItems: 'PRODUCTOS',
+    colNeedsLook: 'PARA REVISAR',
+    colShortfall: 'FALTANTE',
+    colNote: 'NOTA',
+    view: 'Ver',
+
+    // Counts — sheet
+    countSheetTitle: 'Contar el inventario',
+    countSheetIntro: 'Anote lo que encuentre. Deje en blanco lo que no cuente.',
+    countBlindNote: 'La cantidad esperada está oculta a propósito — eso es lo que hace que el conteo sirva.',
+    dateCounted: 'FECHA DEL CONTEO *',
+    area: 'ÁREA',
+    everywhere: 'Todo',
+    whoNote: 'QUIÉN / NOTA',
+    whoPlaceholder: 'Carlos — cocina',
+    highPriority: '🔴 Prioridad alta',
+    mediumPriority: '🟡 Media',
+    normalPriority: '⚪ Normal',
+    highPriorityHint: 'Proteínas y productos caros. Si hay poco tiempo, cuente solo estos.',
+    itemsCounted: '{n} producto(s) contados',
+    notANumber: '{n} NO SON NÚMEROS',
+    saveCount: 'Guardar conteo y comparar',
+    saving: 'Guardando…',
+    cancel: 'Cancelar',
+    systemSays: 'el sistema dice',
+    inUnit: 'en',
+    noItemsInArea: 'No hay productos para contar en esta área.',
+
+    // Counts — result
+    resultTitle: 'Resultado del conteo',
+    resultIntro: 'Diferencia entre lo encontrado y lo esperado. El inventario ya quedó ajustado al conteo.',
+    back: 'Volver',
+    statItems: 'PRODUCTOS CONTADOS',
+    statNeedsLook: 'PARA REVISAR',
+    statShortfall: 'VALOR DEL FALTANTE',
+    alertLine: '{n} producto(s) tienen un faltante mayor al límite.',
+    alertAdvice: 'Antes de pensar en robo, revise si se explica por desperdicio, comida del personal o una compra sin registrar.',
+    colExpected: 'ESPERADO',
+    colCounted: 'CONTADO',
+    colDifference: 'DIFERENCIA',
+    colValue: 'VALOR',
+    check: 'REVISAR',
+
+    // Waste
+    wasteTitle: 'Desperdicio y ajustes',
+    wasteIntro: 'Todo lo que sale del inventario sin venderse. El POS no tiene dónde anotarlo, y sin esto cada tomate dañado aparece como faltante.',
+    wasteWhat: 'QUÉ',
+    wasteChoose: '— elija un producto —',
+    wasteHowMuch: 'CUÁNTO',
+    wasteReason: 'MOTIVO',
+    wasteDate: 'FECHA',
+    wasteNote: 'NOTA',
+    wasteNoteRequired: 'Obligatorio — explique la corrección',
+    wasteNoteOptional: 'Opcional',
+    wasteRecord: 'Registrar',
+    wasteRecent: 'Registrado en los últimos 14 días',
+    wasteEmpty: 'Nada registrado todavía. Si el desperdicio no se anota, el conteo va a seguir mostrando faltantes que nadie puede explicar.',
+    wasteOpeningHint: 'El inventario inicial SUMA. Úselo una vez por producto al empezar, para registrar lo que ya había.',
+    wasteStaffHint: 'La comida del personal normalmente viene de un mercado aparte. Anótela aquí solo si salió del inventario del restaurante.',
+    wasteRecorded: 'Registrado {qty} de {item}.',
+    colItem: 'PRODUCTO',
+    colQty: 'CANTIDAD',
+    colReason: 'MOTIVO',
+
+    // Reasons
+    reason_waste: 'Desperdicio / dañado',
+    reason_staff_meal: 'Comida del personal',
+    reason_comp: 'Cortesía o plato rehecho',
+    reason_transfer_out: 'Trasladado a otro lado',
+    reason_adjustment: 'Corrección manual',
+    reason_opening: 'Inventario inicial (suma)',
+
+    // Areas
+    area_kitchen: 'Cocina',
+    area_bar: 'Bar',
+    area_fridge: 'Nevera',
+    area_freezer: 'Congelador',
+    area_dry_store: 'Bodega',
+    area_other: 'Otro',
+
+    loading: 'Cargando…',
+        statusChangeFailed: 'No se pudo guardar el cambio. Revise la conexión e intente de nuevo.',
     },
 };
 
-export function t(lang: Lang, key: string, vars?: Record<string, string>): string {
+export function t(lang: Lang, key: string, vars?: Record<string, string | number>): string {
     let str = translations[lang]?.[key] ?? translations.en[key] ?? key;
     if (vars) {
         for (const [k, v] of Object.entries(vars)) {
-            str = str.replace(`{${k}}`, v);
+            str = str.replaceAll(`{${k}}`, String(v));
         }
     }
     return str;
@@ -330,4 +530,27 @@ export function formatDateTimeMedellin(isoString: string, lang: Lang): string {
         minute: '2-digit',
         hour12: true,
     }).format(new Date(isoString));
+}
+
+const LANG_KEY = 'smokeys_lang';
+
+// Spanish by default: the people who use the count and waste screens every
+// week work in the restaurant. Stored under the same key as the rest of the
+// app so nobody has to choose their language twice.
+export function getLang(): Lang {
+    if (typeof window === 'undefined') return 'es';
+    try {
+        const saved = window.localStorage.getItem(LANG_KEY);
+        return saved === 'en' || saved === 'es' ? saved : 'es';
+    } catch {
+        return 'es';
+    }
+}
+
+export function setLang(lang: Lang): void {
+    try {
+        window.localStorage.setItem(LANG_KEY, lang);
+    } catch {
+        // Private browsing or blocked storage; the choice just will not persist.
+    }
 }
