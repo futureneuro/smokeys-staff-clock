@@ -18,11 +18,24 @@ const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'im
 // Tried in order. Each fallback sits on separate capacity and, on the free
 // tier, its own quota bucket — so an overloaded or exhausted primary does not
 // take receipt scanning down.
+//
+// Ordered by measured round-trip on this project's key (2026-09-14, one-token
+// reply), not by version number:
+//
+//   gemini-3.6-flash      1.7s
+//   gemini-3.5-flash      4.6s
+//   gemini-flash-latest  47.3s   alias — whatever it resolves to today thinks hard
+//   gemini-3.7-flash      fails  503 UNAVAILABLE, or ~37s when it does answer
+//
+// The newest model was previously first and was the reason scanning failed: it
+// is overloaded, and a single call could eat the whole request budget before
+// any fallback was reached. Re-measure before reordering — these are capacity
+// figures, not model quality, and they move.
 const MODEL_CANDIDATES = [...new Set([
-  Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.7-flash',
-  'gemini-flash-latest',
-  'gemini-3.6-flash',
+  Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.6-flash',
   'gemini-3.5-flash',
+  'gemini-flash-latest',
+  'gemini-3.7-flash',
 ])];
 
 const RESPONSE_SCHEMA = {
