@@ -1377,15 +1377,16 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
         setAiSuggestions([]);
         setApprovedIndices(new Set());
         try {
-            const { data: settings } = await supabase.from('settings').select('gemini_api_key').limit(1).single();
             const activeStaff = staffList.filter(s => s.active && s.role === 'staff');
+            // No api_key: generate-tasks reads it server-side with the service
+            // role. Fetching it here meant the key had to be readable with the
+            // anon key, which ships in the public bundle.
             const res = await fetch(`${supabaseUrl}/functions/v1/generate-tasks`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     instruction: aiInstruction,
                     staff_list: activeStaff.map(s => ({ name: s.name, role: s.role, staff_code: s.staff_code })),
-                    api_key: settings?.gemini_api_key || undefined,
                 }),
             });
             const data = await res.json();
@@ -4244,6 +4245,10 @@ function parseGoogleMapsUrl(url: string): { lat: number; lng: number } | null {
 }
 
 
+// The column list below is spelled out rather than '*': gemini_api_key is no
+// longer readable with the anon key, and a star select would fail on the whole
+// row because of it. Written inline because supabase-js infers the row type
+// from a string literal, not from a variable.
 function SettingsPanel() {
     const [mapsLink, setMapsLink] = useState('');
     const [parsedCoords, setParsedCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -4259,7 +4264,7 @@ function SettingsPanel() {
     }, []);
 
     async function loadSettings() {
-        const { data } = await supabase.from('settings').select('*').limit(1).single();
+        const { data } = await supabase.from('settings').select('id, restaurant_name, restaurant_lat, restaurant_lng, radius_meters, default_break_short, default_break_medium, default_break_long').limit(1).single();
         if (data) {
             setCurrentSettings(data);
             setRadiusMeters(data.radius_meters || 100);
@@ -4351,7 +4356,7 @@ function SettingsPanel() {
         }
 
         // Refresh settings from DB — keep parsedCoords as the source of truth
-        const { data } = await supabase.from('settings').select('*').limit(1).single();
+        const { data } = await supabase.from('settings').select('id, restaurant_name, restaurant_lat, restaurant_lng, radius_meters, default_break_short, default_break_medium, default_break_long').limit(1).single();
         if (data) {
             setCurrentSettings(data);
             setRadiusMeters(data.radius_meters || 100);
@@ -4590,11 +4595,10 @@ function AIConfigCard() {
     }, []);
 
     async function loadKey() {
-        const { data } = await supabase.from('settings').select('gemini_api_key').limit(1).single();
-        if (data?.gemini_api_key) {
-            setApiKey(data.gemini_api_key);
-            setHasKey(true);
-        }
+        // Only whether a key exists, never the key. The field stays empty and is
+        // for typing a replacement.
+        const { data } = await supabase.rpc('gemini_key_is_set');
+        setHasKey(data === true);
     }
 
     async function saveKey() {
@@ -4619,9 +4623,12 @@ function AIConfigCard() {
             const res = await fetch(`${supabaseUrl}/functions/v1/generate-tasks`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                // Typed key wins, so a new one can be tested before saving.
+                // Empty field tests the key already stored, which the function
+                // reads server-side.
                 body: JSON.stringify({
                     instruction: 'Create 1 test task',
-                    api_key: apiKey.trim(),
+                    ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
                 }),
             });
             const data = await res.json();
@@ -4674,7 +4681,7 @@ function AIConfigCard() {
                     <button onClick={saveKey} className="btn-primary" disabled={savingKey || !apiKey.trim()} style={{ width: 'auto', padding: '10px 20px' }}>
                         {savingKey ? 'Saving...' : savedKey ? '✅ Saved!' : '💾 Save Key'}
                     </button>
-                    <button onClick={testKey} className="btn-secondary" disabled={testing || !apiKey.trim()} style={{ padding: '10px 20px', fontSize: 13 }}>
+                    <button onClick={testKey} className="btn-secondary" disabled={testing || (!apiKey.trim() && !hasKey)} style={{ padding: '10px 20px', fontSize: 13 }}>
                         {testing ? '⏳ Testing...' : '🧪 Test Connection'}
                     </button>
                 </div>
