@@ -145,6 +145,8 @@ export interface SalesEntry {
     id: string;
     sold_on: string;
     status: 'draft' | 'confirmed' | 'void';
+    // 'olaclick' when the day was imported from the register.
+    source: 'manual' | 'olaclick';
     note: string | null;
     created_at: string;
     confirmed_at: string | null;

@@ -7,3 +7,4 @@ out/
 supabase/.temp/
 deploy.zip
 tsconfig.tsbuildinfo
+.mcp.json

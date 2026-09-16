@@ -10,11 +10,12 @@ import MenuRecipes from './MenuRecipes';
 import StockCounts from './StockCounts';
 import WasteLog from './WasteLog';
 import AlertsPanel from './AlertsPanel';
+import PosSync from './PosSync';
 import { fetchPurchaseLines, fetchPurchases, fetchSalesEntries } from '@/lib/inventory-api';
 import { formatCop, formatQty } from '@/lib/inventory-units';
 import type { Purchase, PurchaseLine, SalesEntry as SalesEntryRow } from '@/lib/inventory-types';
 
-type InventoryTab = 'stock' | 'counts' | 'alerts' | 'purchases' | 'sales' | 'waste' | 'recipes' | 'items';
+type InventoryTab = 'stock' | 'counts' | 'alerts' | 'purchases' | 'sales' | 'pos' | 'waste' | 'recipes' | 'items';
 
 const TAB_LABEL: Record<InventoryTab, string> = {
     stock: '📊 Stock',
@@ -22,6 +23,7 @@ const TAB_LABEL: Record<InventoryTab, string> = {
     alerts: '🔔 Alerts',
     purchases: '🧾 Purchases',
     sales: '🍽️ Sales',
+    pos: '🔗 POS',
     waste: '🗑️ Waste',
     recipes: '📖 Recipes',
     items: '📦 Items',
@@ -143,6 +145,7 @@ export default function InventoryPanel({ adminId }: { adminId: string }) {
             {tab === 'stock' && <StockOverview />}
             {tab === 'counts' && <StockCounts adminId={adminId} />}
             {tab === 'alerts' && <AlertsPanel adminId={adminId} />}
+            {tab === 'pos' && <PosSync adminId={adminId} />}
             {tab === 'waste' && <WasteLog adminId={adminId} />}
             {tab === 'recipes' && <MenuRecipes />}
             {tab === 'items' && <ItemCatalog />}
@@ -175,6 +178,7 @@ export default function InventoryPanel({ adminId }: { adminId: string }) {
                                     <tr>
                                         <th style={iv.th}>DATE SOLD</th>
                                         <th style={iv.th}>STATUS</th>
+                                        <th style={iv.th}>SOURCE</th>
                                         <th style={iv.th}>NOTE</th>
                                         <th style={iv.th}>ENTERED</th>
                                     </tr>
@@ -188,6 +192,7 @@ export default function InventoryPanel({ adminId }: { adminId: string }) {
                                                     {entry.status.toUpperCase()}
                                                 </span>
                                             </td>
+                                            <td style={iv.td}>{entry.source === 'olaclick' ? 'OlaClick' : 'Typed in'}</td>
                                             <td style={iv.td}>{entry.note ?? '—'}</td>
                                             <td style={iv.td}>{new Date(entry.created_at).toLocaleDateString('es-CO')}</td>
                                         </tr>
