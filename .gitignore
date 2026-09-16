@@ -6,3 +6,5 @@ out/
 .env*.local
 supabase/.temp/
 deploy.zip
+tsconfig.tsbuildinfo
+.mcp.json

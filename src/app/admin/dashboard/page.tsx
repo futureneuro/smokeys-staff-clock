@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { EDGE_FUNCTIONS_BASE_URL, supabase } from '@/lib/supabase';
+import InventoryPanel from '@/components/inventory/InventoryPanel';
 
 interface AdminSession {
     id: string;
@@ -34,7 +35,7 @@ interface TimeLog {
     staff?: Staff;
 }
 
-type Tab = 'staff' | 'logs' | 'reports' | 'tasks' | 'shifts' | 'monitor' | 'qrcode' | 'settings';
+type Tab = 'staff' | 'logs' | 'reports' | 'tasks' | 'shifts' | 'inventory' | 'monitor' | 'qrcode' | 'settings';
 
 export default function AdminDashboard() {
     const router = useRouter();
@@ -91,15 +92,22 @@ export default function AdminDashboard() {
     const fetchLogs = useCallback(async () => {
         let query = supabase
             .from('time_logs')
-            .select('*, staff(*)')
+            .select('*, staff!staff_id(*)')
             .order('check_in', { ascending: false })
             .limit(200);
 
         if (filterStaffId) query = query.eq('staff_id', filterStaffId);
-        if (dateFrom) query = query.gte('check_in', dateFrom);
-        if (dateTo) query = query.lte('check_in', dateTo + 'T23:59:59');
+        // Bogota is UTC-5 (no DST). Append offset so timestamptz compare matches local calendar day.
+        if (dateFrom) query = query.gte('check_in', dateFrom + 'T00:00:00-05:00');
+        if (dateTo) query = query.lte('check_in', dateTo + 'T23:59:59-05:00');
 
-        const { data } = await query;
+        const { data, error } = await query;
+        if (error) {
+            console.error('fetchLogs failed:', error);
+            alert(`Failed to load time logs: ${error.message}`);
+            setTimeLogs([]);
+            return;
+        }
         if (data) setTimeLogs(data);
     }, [filterStaffId, dateFrom, dateTo]);
 
@@ -326,24 +334,90 @@ export default function AdminDashboard() {
         setShowStaffForm(true);
     }
 
-    function exportCSV() {
-        const headers = ['Staff ID', 'Staff Name', 'Date', 'Check In', 'Check Out', 'Total Hours', 'GPS', 'IP'];
-        const rows = timeLogs.map(log => {
-            const s = log.staff as unknown as Staff;
+    async function exportCSV() {
+        const BOGOTA_TZ = 'America/Bogota';
+        const dateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: BOGOTA_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+        const timeFmt = new Intl.DateTimeFormat('en-GB', { timeZone: BOGOTA_TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        const fmtDate = (iso: string | null) => (iso ? dateFmt.format(new Date(iso)) : '');
+        const fmtTime = (iso: string | null) => (iso ? timeFmt.format(new Date(iso)) : '');
+
+        // CSV-safe: escape quotes; prefix '=','+','-','@' to neutralize formula injection,
+        // but skip the prefix on plain numeric values so Excel still treats them as numbers.
+        const isNumeric = (s: string) => /^[+-]?\d+(\.\d+)?$/.test(s);
+        const esc = (v: unknown) => {
+            const s = v === null || v === undefined ? '' : String(v);
+            const safe = /^[=+\-@]/.test(s) && !isNumeric(s) ? `'${s}` : s;
+            return `"${safe.replace(/"/g, '""')}"`;
+        };
+
+        let query = supabase
+            .from('time_logs')
+            .select('*, staff!staff_id(*)')
+            .order('check_in', { ascending: false });
+
+        if (filterStaffId) query = query.eq('staff_id', filterStaffId);
+        if (dateFrom) query = query.gte('check_in', dateFrom + 'T00:00:00-05:00');
+        if (dateTo) query = query.lte('check_in', dateTo + 'T23:59:59-05:00');
+
+        const { data: logs, error } = await query;
+        if (error) {
+            alert(`Failed to load logs for export: ${error.message}`);
+            return;
+        }
+        if (!logs || logs.length === 0) {
+            alert('No time logs match the current filters.');
+            return;
+        }
+
+        const logIds = logs.map(l => l.id);
+        const { data: breakRows } = await supabase
+            .from('breaks')
+            .select('time_log_id, break_start, break_end, duration_minutes')
+            .in('time_log_id', logIds)
+            .order('break_start', { ascending: true });
+
+        const breaksByLog = new Map<string, { break_start: string; break_end: string | null; duration_minutes: number | null }[]>();
+        (breakRows || []).forEach(b => {
+            const arr = breaksByLog.get(b.time_log_id) || [];
+            arr.push(b);
+            breaksByLog.set(b.time_log_id, arr);
+        });
+
+        const headers = [
+            'Staff Code', 'Staff Name', 'Staff ID',
+            'Date (Bogota)', 'Check In (Bogota)', 'Check Out (Bogota)',
+            'Total Hours', 'Break Count', 'Total Break Minutes', 'Break Details',
+            'GPS Lat', 'GPS Lng', 'IP',
+        ];
+
+        const rows = logs.map(log => {
+            const s = log.staff as unknown as Staff | null;
+            const brks = breaksByLog.get(log.id) || [];
+            const totalBreakMin = brks.reduce((sum, b) => sum + (b.duration_minutes || 0), 0);
+            const breakDetails = brks
+                .map(b => `${fmtTime(b.break_start)}-${b.break_end ? fmtTime(b.break_end) : 'open'} (${b.duration_minutes ?? '?'}m)`)
+                .join(' | ');
             return [
                 s?.staff_code || '',
                 s?.name || '',
-                new Date(log.check_in).toLocaleDateString(),
-                new Date(log.check_in).toLocaleTimeString(),
-                log.check_out ? new Date(log.check_out).toLocaleTimeString() : 'Still In',
-                log.total_hours?.toFixed(2) || '-',
-                `${log.gps_lat},${log.gps_lng}`,
+                log.staff_id,
+                fmtDate(log.check_in),
+                fmtTime(log.check_in),
+                log.check_out ? fmtTime(log.check_out) : 'Still In',
+                log.total_hours != null ? log.total_hours.toFixed(2) : '',
+                brks.length,
+                totalBreakMin,
+                breakDetails,
+                log.gps_lat ?? '',
+                log.gps_lng ?? '',
                 log.ip_address || '',
             ];
         });
 
-        const csv = [headers, ...rows].map(r => r.map(c => `"${c}"`).join(',')).join('\n');
-        const blob = new Blob([csv], { type: 'text/csv' });
+        // 'sep=,' directive forces Excel to use comma delimiter even in locales (e.g. es-CO)
+        // where the default list separator is ';' — otherwise the whole row lands in column A.
+        const csv = '﻿sep=,\r\n' + [headers, ...rows].map(r => r.map(esc).join(',')).join('\r\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -379,7 +453,7 @@ export default function AdminDashboard() {
 
             {/* Tabs */}
             <nav style={styles.tabs}>
-                {(['staff', 'logs', 'reports', 'tasks', 'shifts', 'monitor', 'qrcode', 'settings'] as Tab[]).map(tab => (
+                {(['staff', 'logs', 'reports', 'tasks', 'shifts', 'inventory', 'monitor', 'qrcode', 'settings'] as Tab[]).map(tab => (
                     <button
                         key={tab}
                         onClick={() => setActiveTab(tab)}
@@ -388,7 +462,7 @@ export default function AdminDashboard() {
                             ...(activeTab === tab ? styles.tabActive : {}),
                         }}
                     >
-                        {tab === 'staff' ? '👥 Staff' : tab === 'logs' ? '📋 Time Logs' : tab === 'reports' ? '📊 Reports' : tab === 'tasks' ? '✅ Tasks' : tab === 'shifts' ? '📅 Shifts' : tab === 'monitor' ? '📡 Monitor' : tab === 'qrcode' ? '📱 QR Code' : '⚙️ Settings'}
+                        {tab === 'staff' ? '👥 Staff' : tab === 'logs' ? '📋 Time Logs' : tab === 'reports' ? '📊 Reports' : tab === 'tasks' ? '✅ Tasks' : tab === 'shifts' ? '📅 Shifts' : tab === 'inventory' ? '📦 Inventory' : tab === 'monitor' ? '📡 Monitor' : tab === 'qrcode' ? '📱 QR Code' : '⚙️ Settings'}
                     </button>
                 ))}
             </nav>
@@ -677,6 +751,11 @@ export default function AdminDashboard() {
                     <TasksPanel staffList={staffList} adminId={admin?.id || ''} />
                 )}
 
+                {/* ── INVENTORY TAB ── */}
+                {activeTab === 'inventory' && (
+                    <InventoryPanel adminId={admin?.id || ''} />
+                )}
+
                 {/* ── SHIFTS TAB ── */}
                 {activeTab === 'shifts' && (
                     <ShiftsPanel staffList={staffList} />
@@ -709,6 +788,8 @@ interface TaskTemplate {
     title: string;
     description: string | null;
     priority: string;
+    // Tasks assigned from this template start out requiring a proof photo.
+    requires_photo?: boolean;
     created_by: string | null;
     created_at: string;
 }
@@ -724,6 +805,7 @@ interface Task {
     priority: string;
     recurrence_rule: { frequency: string; interval: number; end_date?: string } | null;
     recurrence_group_id: string | null;
+    requires_photo?: boolean;
     proof_url: string | null;
     notes: string | null;
     created_by: string | null;
@@ -767,12 +849,21 @@ interface AISuggestion {
     priority: string;
 }
 
+// Mirrors the word list in public.task_status_is_complete. Both sides consult
+// task_statuses.is_complete first; this is only the fallback for a status the
+// admin never classified.
+const COMPLETING_STATUS_WORDS = [
+    'completed', 'complete', 'completado', 'completada',
+    'hecho', 'hecha', 'done', 'finalizado', 'finalizada',
+];
+
 interface TaskStatusDef {
     id: string;
     label: string;
     color: string;
     sort_order: number;
     is_default: boolean;
+    is_complete?: boolean;
 }
 
 interface TaskComment {
@@ -790,7 +881,7 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
     const [templates, setTemplates] = useState<TaskTemplate[]>([]);
     const [loadingTemplates, setLoadingTemplates] = useState(true);
     const [showTemplateForm, setShowTemplateForm] = useState(false);
-    const [templateForm, setTemplateForm] = useState({ title: '', description: '', priority: 'medium' });
+    const [templateForm, setTemplateForm] = useState({ title: '', description: '', priority: 'medium', requires_photo: false });
     const [templateFormLoading, setTemplateFormLoading] = useState(false);
     const [deleteTemplateId, setDeleteTemplateId] = useState<string | null>(null);
     const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
@@ -893,6 +984,19 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
         });
     }, [tasks, today]);
 
+    // Whether a status means "finished". Asks the database rather than testing
+    // a literal, so the admin screen, the staff app and the photo trigger all
+    // agree about a custom status such as "Hecho".
+    function statusIsComplete(status: string): boolean {
+        const match = statuses.find(
+            s => s.label.trim().toLowerCase() === status.trim().toLowerCase());
+        // An explicit flag from task_statuses wins, exactly as in the database.
+        if (match && typeof (match as { is_complete?: boolean }).is_complete === 'boolean') {
+            return Boolean((match as { is_complete?: boolean }).is_complete);
+        }
+        return COMPLETING_STATUS_WORDS.includes(status.trim().toLowerCase());
+    }
+
     // Template CRUD
     async function createOrUpdateTemplate(e: React.FormEvent) {
         e.preventDefault();
@@ -902,6 +1006,7 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                 title: templateForm.title,
                 description: templateForm.description || null,
                 priority: templateForm.priority,
+                requires_photo: templateForm.requires_photo,
             }).eq('id', editingTemplateId);
             if (error) { alert('Failed to update: ' + error.message); setTemplateFormLoading(false); return; }
         } else {
@@ -909,20 +1014,21 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                 title: templateForm.title,
                 description: templateForm.description || null,
                 priority: templateForm.priority,
+                requires_photo: templateForm.requires_photo,
                 created_by: adminId || null,
             });
             if (error) { alert('Failed to create: ' + error.message); setTemplateFormLoading(false); return; }
         }
         setShowTemplateForm(false);
         setEditingTemplateId(null);
-        setTemplateForm({ title: '', description: '', priority: 'medium' });
+        setTemplateForm({ title: '', description: '', priority: 'medium', requires_photo: false });
         setTemplateFormLoading(false);
         fetchTemplates();
     }
 
     function startEditTemplate(tmpl: TaskTemplate) {
         setEditingTemplateId(tmpl.id);
-        setTemplateForm({ title: tmpl.title, description: tmpl.description || '', priority: tmpl.priority });
+        setTemplateForm({ title: tmpl.title, description: tmpl.description || '', priority: tmpl.priority, requires_photo: Boolean(tmpl.requires_photo) });
         setShowTemplateForm(true);
         setShowAI(false);
     }
@@ -955,15 +1061,34 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
             ...(editTaskForm.recurrence_end ? { end_date: editTaskForm.recurrence_end } : {}),
         } : null;
 
-        // Save this task first
-        await supabase.from('tasks').update({
+        // Save this task first. The database refuses to complete a task that
+        // requires a photo and has none, so a discarded error would close the
+        // modal while nothing had actually changed.
+        const { error: saveError } = await supabase.from('tasks').update({
             status: editTaskForm.status,
             priority: editTaskForm.priority,
             due_date: editTaskForm.due_date,
             staff_id: editTaskForm.staff_id,
-            completed_at: editTaskForm.status === 'Completed' ? new Date().toISOString() : null,
+            completed_at: statusIsComplete(editTaskForm.status) ? new Date().toISOString() : null,
             recurrence_rule: recurrenceRule,
         }).eq('id', editingTask.id);
+
+        if (saveError) {
+            // Decided from the error, not from the task's fields. Guessing from
+            // requires_photo blamed a missing photo for offline saves, invalid
+            // dates and RLS refusals alike.
+            const isProofError = /foto|photo/i.test(saveError.message);
+            alert(
+                isProofError
+                    ? 'This task needs a photo before it can be completed. The photo is uploaded by the staff member in their app.'
+                    : `Could not save: ${saveError.message}`
+            );
+            // Close the confirmation overlay too. Returning without it left the
+            // dialog on screen with no sign anything had happened, and pressing
+            // its button again just repeated the same failing update.
+            setApplyAllConfirm({ show: false });
+            return;
+        }
 
         // Apply changes to ALL sibling instances in this recurrence group
         if (applyToAll && editingTask.recurrence_group_id) {
@@ -1191,6 +1316,7 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
             status: defaultStatus,
             priority: assignForm.priority,
             created_by: adminId || null,
+            requires_photo: Boolean(assignTemplate.requires_photo),
             recurrence_rule: recurrenceRule,
             recurrence_group_id: groupId,
         });
@@ -1226,6 +1352,7 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                     status: defaultStatus,
                     priority: assignForm.priority,
                     created_by: adminId || null,
+                    requires_photo: Boolean(assignTemplate.requires_photo),
                     recurrence_rule: recurrenceRule,
                     recurrence_group_id: groupId,
                 });
@@ -1250,15 +1377,16 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
         setAiSuggestions([]);
         setApprovedIndices(new Set());
         try {
-            const { data: settings } = await supabase.from('settings').select('gemini_api_key').limit(1).single();
             const activeStaff = staffList.filter(s => s.active && s.role === 'staff');
+            // No api_key: generate-tasks reads it server-side with the service
+            // role. Fetching it here meant the key had to be readable with the
+            // anon key, which ships in the public bundle.
             const res = await fetch(`${supabaseUrl}/functions/v1/generate-tasks`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     instruction: aiInstruction,
                     staff_list: activeStaff.map(s => ({ name: s.name, role: s.role, staff_code: s.staff_code })),
-                    api_key: settings?.gemini_api_key || undefined,
                 }),
             });
             const data = await res.json();
@@ -1606,6 +1734,12 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                                                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                                             <strong style={{ color: '#fff', fontSize: 14 }}>{task.recurrence_rule && '🔄 '}{task.title}</strong>
                                                             {statusBadge(task.status)}
+                                                            {task.requires_photo && (
+                                                                <span
+                                                                    title={task.proof_url ? 'Photo attached' : 'Photo required, not yet uploaded'}
+                                                                    style={{ fontSize: 11 }}
+                                                                >{task.proof_url ? '📸✅' : '📸'}</span>
+                                                            )}
                                                         </div>
                                                         <p style={{ color: '#888', fontSize: 12, margin: '4px 0 0' }}>{task.staff?.name || 'Unassigned'}</p>
                                                     </div>
@@ -1706,11 +1840,21 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                                     <option value="medium">🟡 Medium Priority</option>
                                     <option value="high">🔴 High Priority</option>
                                 </select>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, cursor: 'pointer', padding: '8px 10px', background: templateForm.requires_photo ? 'rgba(245,158,11,0.1)' : 'transparent', borderRadius: 8, border: `1px solid ${templateForm.requires_photo ? 'rgba(245,158,11,0.35)' : '#333'}` }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={templateForm.requires_photo}
+                                        onChange={e => setTemplateForm({ ...templateForm, requires_photo: e.target.checked })}
+                                    />
+                                    <span style={{ fontSize: 13, color: templateForm.requires_photo ? '#f59e0b' : '#999' }}>
+                                        📸 Require a photo before this task can be completed
+                                    </span>
+                                </label>
                                 <div style={{ display: 'flex', gap: 8 }}>
                                     <button type="submit" className="btn-primary" disabled={templateFormLoading} style={{ flex: 1, padding: '10px', fontSize: 13 }}>
                                         {templateFormLoading ? 'Saving...' : editingTemplateId ? '✅ Update Template' : '✅ Create Template'}
                                     </button>
-                                    <button type="button" onClick={() => { setShowTemplateForm(false); setEditingTemplateId(null); setTemplateForm({ title: '', description: '', priority: 'medium' }); }} className="btn-secondary" style={{ padding: '10px 16px', fontSize: 13 }}>Cancel</button>
+                                    <button type="button" onClick={() => { setShowTemplateForm(false); setEditingTemplateId(null); setTemplateForm({ title: '', description: '', priority: 'medium', requires_photo: false }); }} className="btn-secondary" style={{ padding: '10px 16px', fontSize: 13 }}>Cancel</button>
                                 </div>
                             </form>
                         )}
@@ -2381,6 +2525,31 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                             <button onClick={() => { setEditingTask(null); setEditingGroupMode(false); setTaskComments([]); setCommentText(''); setCommentFile(null); setCommentPreview(null); }} style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', cursor: 'pointer', fontSize: 20, fontWeight: 700, width: 34, height: 34, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>✕</button>
                         </div>
 
+                        {/* Proof photo — only for tasks that require one */}
+                        {editingTask.requires_photo && (
+                            <div style={{
+                                marginBottom: 14, padding: 12, borderRadius: 10,
+                                background: editingTask.proof_url ? 'rgba(34,197,94,0.08)' : 'rgba(245,158,11,0.08)',
+                                border: `1px solid ${editingTask.proof_url ? 'rgba(34,197,94,0.3)' : 'rgba(245,158,11,0.35)'}`,
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: editingTask.proof_url ? 8 : 0 }}>
+                                    <span style={{ fontSize: 15 }}>{editingTask.proof_url ? '✅' : '📸'}</span>
+                                    <span style={{ color: editingTask.proof_url ? '#22c55e' : '#f59e0b', fontSize: 13, fontWeight: 700 }}>
+                                        {editingTask.proof_url ? 'Proof photo uploaded' : 'Photo required — not uploaded yet'}
+                                    </span>
+                                </div>
+                                {editingTask.proof_url && (
+                                    /* eslint-disable-next-line @next/next/no-img-element */
+                                    <img
+                                        src={editingTask.proof_url}
+                                        alt="Proof photo"
+                                        style={{ width: '100%', maxHeight: 260, objectFit: 'cover', borderRadius: 8, cursor: 'pointer' }}
+                                        onClick={() => window.open(editingTask.proof_url!, '_blank')}
+                                    />
+                                )}
+                            </div>
+                        )}
+
                         {/* Edit Fields */}
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
                             <div>
@@ -2396,6 +2565,26 @@ function TasksPanel({ staffList, adminId }: { staffList: Staff[]; adminId: strin
                                     <option value="medium">🟡 Medium</option>
                                     <option value="high">🔴 High</option>
                                 </select>
+                            </div>
+                            <div style={{ gridColumn: '1 / -1' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: '#999' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={Boolean(editingTask.requires_photo)}
+                                        onChange={async e => {
+                                            const next = e.target.checked;
+                                            const { error } = await supabase.from('tasks')
+                                                .update({ requires_photo: next }).eq('id', editingTask.id);
+                                            if (error) {
+                                                alert(`Could not change it: ${error.message}`);
+                                                return;
+                                            }
+                                            setEditingTask({ ...editingTask, requires_photo: next });
+                                            fetchTasks();
+                                        }}
+                                    />
+                                    📸 This task needs a photo before it can be completed
+                                </label>
                             </div>
                             <div>
                                 <label style={{ fontSize: 11, fontWeight: 600, color: '#999', textTransform: 'uppercase' as const, letterSpacing: '0.5px', display: 'block', marginBottom: 4 }}>Due Date</label>
@@ -4056,6 +4245,10 @@ function parseGoogleMapsUrl(url: string): { lat: number; lng: number } | null {
 }
 
 
+// The column list below is spelled out rather than '*': gemini_api_key is no
+// longer readable with the anon key, and a star select would fail on the whole
+// row because of it. Written inline because supabase-js infers the row type
+// from a string literal, not from a variable.
 function SettingsPanel() {
     const [mapsLink, setMapsLink] = useState('');
     const [parsedCoords, setParsedCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -4071,7 +4264,7 @@ function SettingsPanel() {
     }, []);
 
     async function loadSettings() {
-        const { data } = await supabase.from('settings').select('*').limit(1).single();
+        const { data } = await supabase.from('settings').select('id, restaurant_name, restaurant_lat, restaurant_lng, radius_meters, default_break_short, default_break_medium, default_break_long').limit(1).single();
         if (data) {
             setCurrentSettings(data);
             setRadiusMeters(data.radius_meters || 100);
@@ -4163,7 +4356,7 @@ function SettingsPanel() {
         }
 
         // Refresh settings from DB — keep parsedCoords as the source of truth
-        const { data } = await supabase.from('settings').select('*').limit(1).single();
+        const { data } = await supabase.from('settings').select('id, restaurant_name, restaurant_lat, restaurant_lng, radius_meters, default_break_short, default_break_medium, default_break_long').limit(1).single();
         if (data) {
             setCurrentSettings(data);
             setRadiusMeters(data.radius_meters || 100);
@@ -4402,11 +4595,10 @@ function AIConfigCard() {
     }, []);
 
     async function loadKey() {
-        const { data } = await supabase.from('settings').select('gemini_api_key').limit(1).single();
-        if (data?.gemini_api_key) {
-            setApiKey(data.gemini_api_key);
-            setHasKey(true);
-        }
+        // Only whether a key exists, never the key. The field stays empty and is
+        // for typing a replacement.
+        const { data } = await supabase.rpc('gemini_key_is_set');
+        setHasKey(data === true);
     }
 
     async function saveKey() {
@@ -4431,9 +4623,12 @@ function AIConfigCard() {
             const res = await fetch(`${supabaseUrl}/functions/v1/generate-tasks`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                // Typed key wins, so a new one can be tested before saving.
+                // Empty field tests the key already stored, which the function
+                // reads server-side.
                 body: JSON.stringify({
                     instruction: 'Create 1 test task',
-                    api_key: apiKey.trim(),
+                    ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
                 }),
             });
             const data = await res.json();
@@ -4486,7 +4681,7 @@ function AIConfigCard() {
                     <button onClick={saveKey} className="btn-primary" disabled={savingKey || !apiKey.trim()} style={{ width: 'auto', padding: '10px 20px' }}>
                         {savingKey ? 'Saving...' : savedKey ? '✅ Saved!' : '💾 Save Key'}
                     </button>
-                    <button onClick={testKey} className="btn-secondary" disabled={testing || !apiKey.trim()} style={{ padding: '10px 20px', fontSize: 13 }}>
+                    <button onClick={testKey} className="btn-secondary" disabled={testing || (!apiKey.trim() && !hasKey)} style={{ padding: '10px 20px', fontSize: 13 }}>
                         {testing ? '⏳ Testing...' : '🧪 Test Connection'}
                     </button>
                 </div>

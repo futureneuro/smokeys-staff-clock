@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSession, logout, clockAction, StaffSession } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
+import { attachTaskProof, taskNeedsProof, uploadTaskProof } from '@/lib/task-proof';
 import { getCurrentPosition, GeoPosition, haversineDistance } from '@/lib/geo';
 import { Lang, t, formatTimeMedellin } from '@/lib/i18n';
 import { getBogotaDateString } from '@/lib/bogota-date';
@@ -36,6 +37,10 @@ interface Task {
     due_date: string;
     status: string;
     priority: string | null;
+    // Set per task when it is assigned. Defaults false, so tasks that already
+    // exist behave exactly as before.
+    requires_photo?: boolean;
+    proof_url?: string | null;
 }
 
 interface TaskComment {
@@ -48,12 +53,20 @@ interface TaskComment {
     staff?: { name: string; staff_code: string; role: string };
 }
 
+// Mirrors the word list in public.task_status_is_complete, used only for a
+// status the admin never classified.
+const COMPLETING_STATUS_WORDS = [
+    'completed', 'complete', 'completado', 'completada',
+    'hecho', 'hecha', 'done', 'finalizado', 'finalizada',
+];
+
 interface TaskStatusDef {
     id: string;
     label: string;
     color: string;
     sort_order: number;
     is_default: boolean;
+    is_complete?: boolean;
 }
 
 type Tab = 'home' | 'history' | 'tasks' | 'profile';
@@ -99,6 +112,14 @@ export default function StaffDashboard() {
 
     // Custom statuses
     const [customStatuses, setCustomStatuses] = useState<TaskStatusDef[]>([]);
+
+    // Proof photo for tasks that require one
+    const [proofUploading, setProofUploading] = useState(false);
+    const [proofError, setProofError] = useState('');
+    // Shown outside the photo panel, so a failure on a task that needs no
+    // photo is still visible.
+    const [statusError, setStatusError] = useState('');
+    const proofFileRef = useRef<HTMLInputElement>(null);
 
     // Task comments
     const [viewingTask, setViewingTask] = useState<Task | null>(null);
@@ -689,21 +710,68 @@ export default function StaffDashboard() {
         setCorrectionSaving(false);
     }
 
-    async function markTaskDone(taskId: string) {
-        await supabase
-            .from('tasks')
-            .update({ status: 'Completed', completed_at: new Date().toISOString() })
-            .eq('id', taskId);
-        fetchDashboardData();
-        if (activeTab === 'tasks') fetchAllTasks();
+    // Whether a status means "finished". Asks the database function that the
+    // photo trigger itself uses, so the client cannot disagree with it about a
+    // custom status. An explicit is_complete = false is respected there.
+    function isCompletingStatus(status: string): boolean {
+        const match = customStatuses.find(
+            s => s.label.trim().toLowerCase() === status.trim().toLowerCase());
+        // An explicit flag wins, matching public.task_status_is_complete. The
+        // rows are already loaded, so this needs no round trip — and the old
+        // failure path fell back to 'completed' alone, disagreeing with the
+        // database's word list.
+        if (match && typeof (match as { is_complete?: boolean }).is_complete === 'boolean') {
+            return Boolean((match as { is_complete?: boolean }).is_complete);
+        }
+        return COMPLETING_STATUS_WORDS.includes(status.trim().toLowerCase());
+    }
+
+    async function handleProofFile(e: React.ChangeEvent<HTMLInputElement>) {
+        const file = e.target.files?.[0];
+        if (!file || !viewingTask) return;
+        setProofUploading(true);
+        setProofError('');
+        try {
+            const { url } = await uploadTaskProof(viewingTask.id, file);
+            await attachTaskProof(viewingTask.id, url);
+            setViewingTask({ ...viewingTask, proof_url: url });
+            fetchDashboardData();
+            if (activeTab === 'tasks') fetchAllTasks();
+        } catch (err) {
+            setProofError(err instanceof Error ? err.message : 'Could not upload the photo.');
+        } finally {
+            setProofUploading(false);
+            if (proofFileRef.current) proofFileRef.current.value = '';
+        }
     }
 
     async function updateTaskStatus(taskId: string, newStatus: string) {
+        // Admins can add their own statuses ("Hecho", "Done"), so testing the
+        // literal 'Completed' would let a custom one close a photo-required
+        // task with no proof. The database trigger enforces the same rule; this
+        // is here to give a useful message rather than a constraint error.
+        const completing = isCompletingStatus(newStatus);
+
+        if (completing && viewingTask?.id === taskId && taskNeedsProof(viewingTask)) {
+            setProofError(t(lang, 'proofRequiredError'));
+            return;
+        }
+
         const updateData: Record<string, unknown> = { status: newStatus };
-        if (newStatus === 'Completed') {
+        if (completing) {
             updateData.completed_at = new Date().toISOString();
         }
-        await supabase.from('tasks').update(updateData).eq('id', taskId);
+        const { error } = await supabase.from('tasks').update(updateData).eq('id', taskId);
+        if (error) {
+            // Only a rejected-proof error should read as a missing photo.
+            // Mapping every failure to that message told people to upload a
+            // photo when the real problem was the network — and for a task
+            // that needs no photo the message rendered nowhere at all.
+            const isProofError = /foto|photo/i.test(error.message);
+            setStatusError(isProofError ? t(lang, 'proofRequiredError') : t(lang, 'statusChangeFailed'));
+            return;
+        }
+        setStatusError('');
         // Update local viewingTask state
         if (viewingTask && viewingTask.id === taskId) {
             setViewingTask({ ...viewingTask, status: newStatus });
@@ -723,6 +791,8 @@ export default function StaffDashboard() {
     }
 
     function openTaskDetail(task: Task) {
+        setStatusError('');
+        setProofError('');
         setViewingTask(task);
         fetchComments(task.id);
     }
@@ -1287,6 +1357,75 @@ export default function StaffDashboard() {
                                 <button onClick={() => { setViewingTask(null); setTaskComments([]); setCommentText(''); setCommentFile(null); setCommentPreview(null); }} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 18 }}>✕</button>
                             </div>
 
+                            {/* Proof photo — only for tasks that require one */}
+                            {viewingTask.requires_photo && (
+                                <div style={{
+                                    marginBottom: 14,
+                                    padding: 12,
+                                    borderRadius: 10,
+                                    background: viewingTask.proof_url ? 'rgba(34,197,94,0.08)' : 'rgba(245,158,11,0.08)',
+                                    borderWidth: 1, borderStyle: 'solid',
+                                    borderColor: viewingTask.proof_url ? 'rgba(34,197,94,0.3)' : 'rgba(245,158,11,0.35)',
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                                        <span style={{ fontSize: 15 }}>{viewingTask.proof_url ? '✅' : '📸'}</span>
+                                        <span style={{
+                                            color: viewingTask.proof_url ? '#22c55e' : '#f59e0b',
+                                            fontSize: 13, fontWeight: 700,
+                                        }}>
+                                            {viewingTask.proof_url ? t(lang, 'proofDone') : t(lang, 'proofRequired')}
+                                        </span>
+                                    </div>
+
+                                    {viewingTask.proof_url ? (
+                                        <>
+                                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                                            <img
+                                                src={viewingTask.proof_url}
+                                                alt={t(lang, 'proofPhoto')}
+                                                style={{ width: '100%', maxHeight: 220, objectFit: 'cover', borderRadius: 8, cursor: 'pointer' }}
+                                                onClick={() => window.open(viewingTask.proof_url!, '_blank')}
+                                            />
+                                            <button
+                                                onClick={() => proofFileRef.current?.click()}
+                                                disabled={proofUploading}
+                                                style={{ marginTop: 8, background: 'none', border: 'none', color: '#888', fontSize: 12, cursor: 'pointer', textDecoration: 'underline' }}
+                                            >{t(lang, 'proofRetake')}</button>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p style={{ color: '#bbb', fontSize: 12, margin: '0 0 10px', lineHeight: 1.5 }}>
+                                                {t(lang, 'proofHint')}
+                                            </p>
+                                            <button
+                                                onClick={() => proofFileRef.current?.click()}
+                                                disabled={proofUploading}
+                                                style={{
+                                                    width: '100%', padding: '12px', borderRadius: 10, border: 'none',
+                                                    background: '#f59e0b', color: '#111', fontSize: 14, fontWeight: 700,
+                                                    cursor: proofUploading ? 'wait' : 'pointer',
+                                                }}
+                                            >
+                                                {proofUploading ? t(lang, 'proofUploading') : t(lang, 'proofTake')}
+                                            </button>
+                                        </>
+                                    )}
+
+                                    {proofError && (
+                                        <p style={{ color: '#ef4444', fontSize: 12, margin: '8px 0 0' }}>{proofError}</p>
+                                    )}
+
+                                    <input
+                                        ref={proofFileRef}
+                                        type="file"
+                                        accept="image/*"
+                                        capture="environment"
+                                        style={{ display: 'none' }}
+                                        onChange={handleProofFile}
+                                    />
+                                </div>
+                            )}
+
                             {/* Status Changer */}
                             <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
                                 <label style={{ color: '#999', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Status</label>
@@ -1313,6 +1452,10 @@ export default function StaffDashboard() {
                                     )}
                                 </select>
                             </div>
+
+                            {statusError && (
+                                <p style={{ color: '#ef4444', fontSize: 12, margin: '-8px 0 12px' }}>{statusError}</p>
+                            )}
 
                             {/* Comments */}
                             <div style={{ borderTop: '1px solid #2a2a2a', paddingTop: 12 }}>
