@@ -633,6 +633,11 @@ export async function saveSalesEntry(input: SaveSalesInput): Promise<number> {
         // The RPC is atomic, so nothing was deducted. Clear the draft rather
         // than leaving a row no screen can reach.
         await supabase.from('inv_sales_entries').delete().eq('id', entryId);
+        // One confirmed entry per day, whether it was imported from the POS or
+        // typed in. Say so instead of surfacing the index name.
+        if (confirmError.code === '23505' || confirmError.message.includes('inv_sales_entries_one_per_day_idx')) {
+            throw new Error(`${input.soldOn} already has confirmed sales on record (imported from the POS or typed in earlier), so it was not deducted again. Check the Sales tab.`);
+        }
         throw new Error(confirmError.message);
     }
 
