@@ -382,3 +382,90 @@ export interface AlertRecipient {
     active: boolean;
     created_at: string;
 }
+
+// ---------------------------------------------------------------------------
+// Monthly report (inv_month_report)
+// ---------------------------------------------------------------------------
+
+export interface ReportSoldItem {
+    menu_item_id: string;
+    name: string;
+    portion_label: string | null;
+    category: string;
+    qty: number;
+    revenue_cop: number;
+    days: number;
+}
+
+export interface ReportPurchasedItem {
+    item_id: string;
+    name: string;
+    base_unit: BaseUnit;
+    base_qty: number;
+    cost_cop: number;
+    purchases: number;
+}
+
+export interface ReportMovement {
+    item_id: string;
+    name: string;
+    base_unit: BaseUnit;
+    reason?: StockEventReason | 'sale' | 'purchase';
+    qty: number;
+    value_cop: number;
+}
+
+export interface ReportStockItem {
+    item_id: string;
+    name: string;
+    base_unit: BaseUnit;
+    category?: string;
+    stock_base_qty: number;
+    stock_value_cop?: number;
+    days_left: number | null;
+}
+
+export interface ReportAlert {
+    id: string;
+    title: string;
+    severity: InventoryAlert['severity'];
+    status: InventoryAlert['status'];
+    items_alerting: number;
+    shortfall_value_cop: number;
+    created_at: string;
+}
+
+export interface MonthReport {
+    month: string;
+    from_on: string;
+    to_on: string;
+    generated_at: string;
+    sold: {
+        items: ReportSoldItem[];
+        total_qty: number;
+        revenue_cop: number;
+        days_with_sales: number;
+        days_from_pos: number;
+        pos: { days_imported: number; days_held: number; revenue_cop: number; item_count: number } | null;
+    };
+    purchases: {
+        count: number;
+        total_cop: number;
+        items: ReportPurchasedItem[];
+    };
+    usage: {
+        by_reason: { reason: string; qty: number; value_cop: number; items: number }[];
+        losses: ReportMovement[];
+        loss_value_cop: number;
+        consumed: ReportMovement[];
+    };
+    stock: {
+        tracked: number;
+        total_value_cop: number;
+        negative: number;
+        out: number;
+        low: ReportStockItem[];
+        items: ReportStockItem[];
+    };
+    alerts: ReportAlert[];
+}

@@ -8,7 +8,7 @@
 // The alert row is created by inv_confirm_count in the database, so the report
 // exists in the app whether or not the email ever goes out.
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { hasSharedSecret, isActiveAdmin, serviceClient } from '../_shared/admin.ts';
 import { corsHeaders, errorResponse, jsonResponse, parseJsonBody } from '../_shared/http.ts';
 import { sendAcsEmail } from '../_shared/azure-email.ts';
 
@@ -128,56 +128,19 @@ function renderText(alert: AlertRow): string {
   ].join('\n');
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Constant-time compare so the secret cannot be recovered by timing.
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-async function isActiveAdmin(
-  supabase: ReturnType<typeof createClient>,
-  adminId: unknown,
-): Promise<boolean> {
-  if (typeof adminId !== 'string' || !UUID_RE.test(adminId)) return false;
-
-  const { data, error } = await supabase
-    .from('staff')
-    .select('id')
-    .eq('id', adminId)
-    .eq('role', 'admin')
-    .eq('active', true)
-    .maybeSingle();
-
-  if (error) {
-    // Fail closed, but say why: a misconfigured service role otherwise looks
-    // identical to "you are not an admin".
-    console.error('Admin check failed:', error.message);
-    return false;
-  }
-  return Boolean(data);
-}
-
 Deno.serve(async req => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return errorResponse('Method not allowed.', 405);
 
-  const url = Deno.env.get('INV_SUPABASE_URL') ?? Deno.env.get('SUPABASE_URL') ?? '';
-  const serviceRole = Deno.env.get('INV_SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-  if (!url || !serviceRole) return errorResponse('Missing Supabase env vars.', 500);
+  const supabase = serviceClient();
+  if (!supabase) return errorResponse('Missing Supabase env vars.', 500);
 
-  const supabase = createClient(url, serviceRole, { auth: { persistSession: false } });
   const body = await parseJsonBody(req);
 
   // Sending email costs money on the restaurant's ACS account and mails every
   // recipient, so the caller has to be one of two things: an active admin, or
   // the scheduled retry holding the shared secret.
-  const secret = Deno.env.get('INVENTORY_ALERT_SECRET') ?? '';
-  const presented = req.headers.get('x-inventory-secret') ?? '';
-  const viaSecret = secret.length > 0 && timingSafeEqual(presented, secret);
+  const viaSecret = hasSharedSecret(req, 'x-inventory-secret', 'INVENTORY_ALERT_SECRET', 1);
 
   if (!viaSecret && !(await isActiveAdmin(supabase, body.admin_id))) {
     return errorResponse('Not authorised.', 403);

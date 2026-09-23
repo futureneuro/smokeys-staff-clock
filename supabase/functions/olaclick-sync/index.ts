@@ -10,8 +10,9 @@
 // records, and hands confirmed days to inv_confirm_sales_entry — the same
 // function the Sales screen uses — so there is exactly one way stock moves.
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, errorResponse, jsonResponse, parseJsonBody } from '../_shared/http.ts';
+import { hasSharedSecret, isActiveAdmin, serviceClient, type ServiceClient } from '../_shared/admin.ts';
+import { GeminiError, generateContent, geminiHttpStatus, resolveGeminiKey } from '../_shared/gemini.ts';
 import {
   discoverTokens,
   resolveDay,
@@ -23,7 +24,7 @@ import {
   type ProductMapping,
 } from '../_shared/pos-mapping.ts';
 
-type Client = ReturnType<typeof createClient>;
+type Client = ServiceClient;
 
 const OLACLICK_BASE = (Deno.env.get('OLACLICK_BASE_URL') ?? 'https://public-api.olaclick.app').replace(/\/+$/, '');
 const TIMEZONE = 'America/Bogota';
@@ -32,43 +33,11 @@ const TIMEZONE = 'America/Bogota';
 const RETRY_WINDOW_DAYS = 14;
 const MAX_PAGES = 20;
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // ---------------------------------------------------------------------------
 // Plumbing
 // ---------------------------------------------------------------------------
-
-function serviceClient(): Client | null {
-  const url = Deno.env.get('INV_SUPABASE_URL') ?? Deno.env.get('SUPABASE_URL') ?? '';
-  const serviceRole = Deno.env.get('INV_SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-  if (!url || !serviceRole) return null;
-  return createClient(url, serviceRole, { auth: { persistSession: false } });
-}
-
-// Constant-time compare so the secret cannot be recovered by timing.
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-async function isActiveAdmin(supabase: Client, adminId: unknown): Promise<boolean> {
-  if (typeof adminId !== 'string' || !UUID_RE.test(adminId)) return false;
-  const { data, error } = await supabase
-    .from('staff')
-    .select('id')
-    .eq('id', adminId)
-    .eq('role', 'admin')
-    .eq('active', true)
-    .maybeSingle();
-  if (error) {
-    console.error('Admin check failed:', error.message);
-    return false;
-  }
-  return Boolean(data);
-}
 
 function bogotaToday(): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -179,12 +148,16 @@ async function upsertImport(supabase: Client, row: Record<string, unknown>) {
 // two runs racing for one day (the schedule and a button press) must not leave
 // the loser's "failed" written over the winner's confirmed import.
 async function confirmedEntryFor(supabase: Client, date: string) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('inv_sales_entries')
     .select('id, source')
     .eq('sold_on', date)
     .eq('status', 'confirmed')
     .maybeSingle();
+  // A failed lookup must not read as "no manual entry": that would let an
+  // import land on top of a day someone typed in, or record a day as failed
+  // when it was in fact confirmed. A missing grant is the usual cause.
+  if (error) throw new Error(`Could not check existing sales for ${date}: ${error.message}`);
   return data as { id: string; source: string } | null;
 }
 
@@ -405,20 +378,6 @@ async function retryHeld(supabase: Client, apiKey: string, trigger: Trigger, ski
 // AI suggestions
 // ---------------------------------------------------------------------------
 
-const SUGGEST_MODELS = [...new Set([
-  Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.6-flash',
-  'gemini-3.5-flash',
-  'gemini-flash-latest',
-])];
-
-async function resolveGeminiKey(supabase: Client): Promise<string | null> {
-  const fromEnv = Deno.env.get('GEMINI_API_KEY');
-  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
-  const { data } = await supabase.from('settings').select('gemini_api_key').limit(1).maybeSingle();
-  const key = (data as { gemini_api_key: string | null } | null)?.gemini_api_key;
-  return key && key.trim() ? key.trim() : null;
-}
-
 const SUGGEST_SCHEMA = {
   type: 'OBJECT',
   properties: {
@@ -496,52 +455,19 @@ ${pieces.map(p => `${p.ref}: ${p.name}`).join('\n') || '(none)'}`;
 }
 
 async function callGemini(apiKey: string, prompt: string): Promise<unknown> {
-  let lastError = 'No model responded.';
-  const started = Date.now();
-
-  for (const model of SUGGEST_MODELS) {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (Date.now() - started > 50_000) throw new Error(`AI suggestion timed out. Last error: ${lastError}`);
-
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            responseMimeType: 'application/json',
-            responseSchema: SUGGEST_SCHEMA,
-          },
-        }),
-      }).catch(e => {
-        lastError = message(e);
-        return null;
-      });
-
-      if (!res) continue;
-      if (res.ok) {
-        const json = await res.json();
-        const text = json?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text ?? '').join('') ?? '';
-        try {
-          return JSON.parse(text);
-        } catch {
-          lastError = `${model} returned unreadable JSON`;
-          break;
-        }
-      }
-
-      const body = await res.text().catch(() => '');
-      lastError = `${model}: ${res.status} ${body.slice(0, 160)}`;
-      if (res.status === 400 && body.includes('API_KEY_INVALID')) throw new Error('The Gemini API key is invalid.');
-      if (res.status === 403) throw new Error('The Gemini API key is not allowed to call this model.');
-      // Only transient errors are worth a second attempt on the same model.
-      if (res.status !== 500 && res.status !== 503) break;
-      await new Promise(r => setTimeout(r, 1500));
-    }
+  const { text, model } = await generateContent(apiKey, {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.1,
+      responseMimeType: 'application/json',
+      responseSchema: SUGGEST_SCHEMA,
+    },
+  });
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new GeminiError('bad_response', `${model} returned unreadable JSON.`);
   }
-
-  throw new Error(`AI suggestion failed. ${lastError}`);
 }
 
 async function suggest(supabase: Client): Promise<{ products: number; pieces: number }> {
@@ -647,11 +573,7 @@ Deno.serve(async req => {
   const body = await parseJsonBody(req);
   const action = typeof body.action === 'string' ? body.action : 'sync';
 
-  const secret = Deno.env.get('POS_SYNC_SECRET') ?? '';
-  const presented = req.headers.get('x-pos-sync-secret') ?? '';
-  // A short or empty secret is treated as unset, so a misconfiguration fails
-  // closed instead of accepting an empty header.
-  const viaSchedule = secret.length >= 32 && timingSafeEqual(presented, secret);
+  const viaSchedule = hasSharedSecret(req, 'x-pos-sync-secret', 'POS_SYNC_SECRET');
   const adminId = typeof body.admin_id === 'string' ? body.admin_id : null;
   const viaAdmin = !viaSchedule && (await isActiveAdmin(supabase, adminId));
 
@@ -701,6 +623,9 @@ Deno.serve(async req => {
     return errorResponse(`Unknown action "${action}".`, 400);
   } catch (e) {
     console.error('olaclick-sync failed:', e);
+    if (e instanceof GeminiError) {
+      return errorResponse(e.message, geminiHttpStatus(e), e.attempts.length ? { attempts: e.attempts } : {});
+    }
     return errorResponse(message(e), 500);
   }
 });

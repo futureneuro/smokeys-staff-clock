@@ -11,6 +11,7 @@ import type {
     MenuItem,
     MenuItemCapacity,
     MenuItemCost,
+    MonthReport,
     PackConversion,
     Purchase,
     PurchaseLine,
@@ -35,6 +36,28 @@ import type {
 const EDGE_BASE = process.env.NEXT_PUBLIC_INVENTORY_EDGE_URL || EDGE_FUNCTIONS_BASE_URL;
 
 export const SCAN_RECEIPT_URL = `${EDGE_BASE.replace(/\/+$/, '')}/scan-receipt`;
+
+// Every inventory edge function is called the same way: JSON in, JSON out,
+// the anon key as bearer so the gateway lets the request through, and
+// `{error}` on failure. The function itself checks admin_id in the body.
+export async function callEdge<T>(url: string, body: Record<string, unknown>): Promise<T> {
+    let res: Response;
+    try {
+        res = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''}`,
+            },
+            body: JSON.stringify(body),
+        });
+    } catch (e) {
+        throw new Error(e instanceof Error ? e.message : 'Could not reach the service.');
+    }
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload?.error || `Service returned ${res.status}.`);
+    return payload as T;
+}
 
 // ---------------------------------------------------------------------------
 // Scanning
@@ -131,22 +154,12 @@ export async function scanReceipt(
 ): Promise<ScanResult> {
     const { base64, mimeType } = prepared ?? await downscaleImage(file);
 
-    const res = await fetch(SCAN_RECEIPT_URL, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            // The function checks this identifies an active admin before it
-            // spends a Gemini call, so the endpoint is not an open OCR proxy
-            // billed to the restaurant's key.
-            Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''}`,
-        },
-        body: JSON.stringify({ image_base64: base64, mime_type: mimeType, admin_id: adminId }),
+    // admin_id: the function checks it identifies an active admin before it
+    // spends a Gemini call, so the endpoint is not an open OCR proxy billed
+    // to the restaurant's key.
+    const payload = await callEdge<Partial<ScanResult>>(SCAN_RECEIPT_URL, {
+        image_base64: base64, mime_type: mimeType, admin_id: adminId,
     });
-
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok) {
-        throw new Error(payload?.error || `Scan failed (${res.status}).`);
-    }
 
     return {
         ...payload,
@@ -815,29 +828,13 @@ export async function dispatchAlertEmails(
     adminId?: string | null,
 ): Promise<{ sent: number; reason?: string }> {
     try {
-        const res = await fetch(INVENTORY_ALERT_URL, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''}`,
-            },
-            body: JSON.stringify({
-                ...(alertId ? { alert_id: alertId } : {}),
-                // The function refuses callers that are neither an admin nor
-                // the scheduled job, so it will not send email for anyone who
-                // merely knows the URL.
-                admin_id: adminId ?? null,
-            }),
+        const payload = await callEdge<{ sent?: number; reason?: string; error?: string }>(INVENTORY_ALERT_URL, {
+            ...(alertId ? { alert_id: alertId } : {}),
+            // The function refuses callers that are neither an admin nor the
+            // scheduled job, so it will not send email for anyone who merely
+            // knows the URL.
+            admin_id: adminId ?? null,
         });
-
-        const payload = await res.json().catch(() => ({}));
-
-        // Failures come back as {error: "..."}. Reading only `reason` turned
-        // every one of them into "unknown reason" on screen.
-        if (!res.ok) {
-            return { sent: 0, reason: payload?.error || `Alert service returned ${res.status}.` };
-        }
-
         return { sent: Number(payload?.sent ?? 0), reason: payload?.reason || payload?.error };
     } catch (e) {
         return { sent: 0, reason: e instanceof Error ? e.message : 'Could not reach the alert service.' };
@@ -890,4 +887,32 @@ export async function deleteAlertRecipient(id: string, actorId: string | null): 
         p_id: id, p_actor_id: actorId,
     });
     if (error) throw new Error(error.message);
+}
+
+// ---------------------------------------------------------------------------
+// Monthly report
+// ---------------------------------------------------------------------------
+
+export const INVENTORY_SUMMARY_URL = `${EDGE_BASE.replace(/\/+$/, '')}/inventory-summary`;
+
+// monthIso is the first day of the month, YYYY-MM-01.
+export async function fetchMonthReport(monthIso: string): Promise<MonthReport> {
+    const { data, error } = await supabase.rpc('inv_month_report', { p_month: monthIso });
+    if (error) throw new Error(error.message);
+    if (!data) throw new Error('The report came back empty.');
+    return data as MonthReport;
+}
+
+// Asks the edge function for a plain-language summary of the same report. The
+// function re-runs inv_month_report server-side, so the summary is always
+// about the numbers on screen and not about anything the browser sent.
+export async function summariseMonth(
+    monthIso: string,
+    lang: 'es' | 'en',
+    adminId: string,
+): Promise<{ summary: string; model_used: string }> {
+    const payload = await callEdge<{ summary?: string; model_used?: string }>(INVENTORY_SUMMARY_URL, {
+        month: monthIso, lang, admin_id: adminId,
+    });
+    return { summary: String(payload.summary ?? ''), model_used: String(payload.model_used ?? '') };
 }

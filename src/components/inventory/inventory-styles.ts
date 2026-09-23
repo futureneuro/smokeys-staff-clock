@@ -129,3 +129,17 @@ export const iv: Record<string, React.CSSProperties> = {
     empty: { padding: 32, textAlign: 'center', color: '#555', fontSize: 13 },
     preview: { maxHeight: 220, borderRadius: 8, border: '1px solid #333', display: 'block' },
 };
+
+// One colour per ledger reason, shared by every screen that lists movements so
+// "waste" is the same red on the waste log and on the monthly report.
+export const REASON_COLOUR: Record<string, string> = {
+    purchase: '#22c55e',
+    opening: '#22c55e',
+    sale: '#60a5fa',
+    count: '#a78bfa',
+    waste: '#ef4444',
+    staff_meal: '#eab308',
+    comp: '#eab308',
+    transfer_out: '#eab308',
+    adjustment: '#f0b427',
+};

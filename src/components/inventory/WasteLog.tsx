@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { iv } from './inventory-styles';
+import { iv, REASON_COLOUR } from './inventory-styles';
 import { fetchItems, fetchRecentMovements, recordStockEvent } from '@/lib/inventory-api';
 import { formatCop, formatQty, getBogotaDateString, isIsoDate, parseQtyInput } from '@/lib/inventory-units';
 import { getLang, setLang as persistLang, t, type Lang } from '@/lib/i18n';
@@ -14,18 +14,6 @@ import {
 // Reasons a person logs by hand. Purchases, sales and counts write their own
 // ledger entries, so they are not offered here.
 const MANUAL_REASONS: StockEventReason[] = ['waste', 'staff_meal', 'comp', 'transfer_out', 'adjustment', 'opening'];
-
-const REASON_COLOUR: Record<string, string> = {
-    purchase: '#22c55e',
-    opening: '#22c55e',
-    sale: '#60a5fa',
-    count: '#a78bfa',
-    waste: '#ef4444',
-    staff_meal: '#eab308',
-    comp: '#eab308',
-    transfer_out: '#eab308',
-    adjustment: '#f0b427',
-};
 
 export default function WasteLog({ adminId }: { adminId: string }) {
     const [items, setItems] = useState<InventoryItem[]>([]);

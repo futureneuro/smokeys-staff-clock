@@ -5,6 +5,7 @@
 // imports are written only by the olaclick-sync edge function.
 
 import { supabase, EDGE_FUNCTIONS_BASE_URL } from './supabase';
+import { callEdge } from './inventory-api';
 import type {
     PosImport,
     PosModifierKind,
@@ -84,25 +85,7 @@ export async function setPosModifierMap(params: {
     if (error) throw new Error(error.message);
 }
 
-async function callSync<T>(body: Record<string, unknown>): Promise<T> {
-    let res: Response;
-    try {
-        res = await fetch(OLACLICK_SYNC_URL, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''}`,
-            },
-            body: JSON.stringify(body),
-        });
-    } catch (e) {
-        throw new Error(e instanceof Error ? e.message : 'Could not reach the POS sync service.');
-    }
-
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(payload?.error || `POS sync service returned ${res.status}.`);
-    return payload as T;
-}
+const callSync = <T>(body: Record<string, unknown>) => callEdge<T>(OLACLICK_SYNC_URL, body);
 
 // Omitting the date imports yesterday, which is what the daily schedule does.
 export async function syncPosDay(soldOn: string | null, adminId: string | null): Promise<PosSyncDayResult[]> {

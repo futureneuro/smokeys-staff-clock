@@ -6,8 +6,9 @@
 // The whole point of the inventory feature is detecting discrepancies, so a
 // hallucinated quantity must never be able to enter the ledger unreviewed.
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders, errorResponse, jsonResponse, parseJsonBody } from '../_shared/http.ts';
+import { isActiveAdmin, serviceClient } from '../_shared/admin.ts';
+import { GeminiError, generateContent, geminiHttpStatus, resolveGeminiKey } from '../_shared/gemini.ts';
 
 // Roughly 8 MB of base64 ~= 6 MB of image. Phone photos compress well below this;
 // anything larger is a sign the client skipped downscaling.
@@ -15,28 +16,11 @@ const MAX_BASE64_LENGTH = 8_000_000;
 
 const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf'];
 
-// Tried in order. Each fallback sits on separate capacity and, on the free
-// tier, its own quota bucket — so an overloaded or exhausted primary does not
-// take receipt scanning down.
-//
-// Ordered by measured round-trip on this project's key (2026-09-14, one-token
-// reply), not by version number:
-//
-//   gemini-3.6-flash      1.7s
-//   gemini-3.5-flash      4.6s
-//   gemini-flash-latest  47.3s   alias — whatever it resolves to today thinks hard
-//   gemini-3.7-flash      fails  503 UNAVAILABLE, or ~37s when it does answer
-//
-// The newest model was previously first and was the reason scanning failed: it
-// is overloaded, and a single call could eat the whole request budget before
-// any fallback was reached. Re-measure before reordering — these are capacity
-// figures, not model quality, and they move.
-const MODEL_CANDIDATES = [...new Set([
-  Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.6-flash',
-  'gemini-3.5-flash',
-  'gemini-flash-latest',
-  'gemini-3.7-flash',
-])];
+// A photo is a big request and 503s are common, so this function retries
+// harder than the text-only ones, but still inside the platform's 60s timeout
+// so the real reason reaches the operator rather than a gateway error.
+const ATTEMPTS_PER_MODEL = 4;
+const REQUEST_BUDGET_MS = 55_000;
 
 const RESPONSE_SCHEMA = {
   type: 'OBJECT',
@@ -141,141 +125,6 @@ Return purchased_on as YYYY-MM-DD. Documents may print "2026/08/08", "08/08/2026
 
 Add a short warning string for anything a reviewer should check by eye: blurry or cut-off regions, a total that does not match the sum of lines, ambiguous quantities, handwriting, glare, or a document type you were unsure about.`;
 
-interface GeminiPart {
-  text?: string;
-}
-
-function serviceClient() {
-  const url = Deno.env.get('INV_SUPABASE_URL') ?? Deno.env.get('SUPABASE_URL') ?? '';
-  const serviceRole = Deno.env.get('INV_SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-  if (!url || !serviceRole) return null;
-  return createClient(url, serviceRole, { auth: { persistSession: false } });
-}
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Each scan spends real money on the restaurant's Gemini key, so the caller has
-// to prove it is an active admin first. Without this the endpoint is a free OCR
-// proxy for anyone who learns the URL, and draining the daily quota takes
-// receipt scanning down for the shop.
-async function isActiveAdmin(
-  supabase: ReturnType<typeof createClient>,
-  adminId: unknown,
-): Promise<boolean> {
-  if (typeof adminId !== 'string' || !UUID_RE.test(adminId)) return false;
-
-  const { data, error } = await supabase
-    .from('staff')
-    .select('id')
-    .eq('id', adminId)
-    .eq('role', 'admin')
-    .eq('active', true)
-    .maybeSingle();
-
-  if (error) {
-    // Fail closed, but say so: a misconfigured service role otherwise looks
-    // identical to a genuine "you are not an admin" and is hard to diagnose.
-    console.error('Admin check failed:', error.message);
-    return false;
-  }
-
-  return Boolean(data);
-}
-
-async function resolveGeminiKey(supabase: ReturnType<typeof createClient>): Promise<string | null> {
-  const fromEnv = Deno.env.get('GEMINI_API_KEY');
-  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
-
-  // Fall back to the key the admin saved in Settings. Read with the service role
-  // so the key never has to travel to the browser.
-  const { data, error } = await supabase.from('settings').select('gemini_api_key').limit(1).maybeSingle();
-  if (error || !data) return null;
-
-  const key = (data as { gemini_api_key: string | null }).gemini_api_key;
-  return key && key.trim() ? key.trim() : null;
-}
-
-// 503 and 500 are transient spikes and clear within seconds, so they are worth
-// waiting out. 429 is a quota bucket, not a burst limit — backing off does not
-// refill it, so it moves straight to the next model instead.
-const RETRY_STATUSES = [500, 503];
-const MAX_ATTEMPTS = 4;
-
-// Four models times four attempts, plus 7s of backoff each, can outrun the
-// platform's request timeout — and a timed-out request replaces the useful
-// "quota exhausted, enable billing" message with a generic gateway error.
-// Attempts stop once this budget is spent so the real reason gets through.
-const REQUEST_BUDGET_MS = 55_000;
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-async function callGeminiOnce(model: string, apiKey: string, base64: string, mimeType: string) {
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-
-  return await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      // Header rather than a ?key= query parameter, which would put the secret
-      // into proxy and request logs along the way.
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify({
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: PROMPT },
-            { inline_data: { mime_type: mimeType, data: base64 } },
-          ],
-        },
-      ],
-      generationConfig: {
-        // Extraction, not creativity.
-        temperature: 0,
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-      },
-    }),
-  });
-}
-
-// An unread response body keeps its stream open, so every discarded attempt
-// must be drained explicitly.
-async function discard(res: Response) {
-  try {
-    await res.body?.cancel();
-  } catch {
-    // Already closed; nothing to release.
-  }
-}
-
-// Gemini returns 503 "model is overloaded" often enough that a single attempt is
-// not usable in a kitchen. Back off and retry before giving up on this model,
-// but never past the deadline: the caller has to receive the real explanation
-// rather than have the gateway time the request out first.
-async function callGemini(
-  model: string,
-  apiKey: string,
-  base64: string,
-  mimeType: string,
-  deadline: number,
-) {
-  let res = await callGeminiOnce(model, apiKey, base64, mimeType);
-
-  for (let attempt = 1; attempt < MAX_ATTEMPTS && RETRY_STATUSES.includes(res.status); attempt++) {
-    // 1s, 2s, 4s plus jitter so parallel scans do not retry in lockstep.
-    const wait = 1000 * 2 ** (attempt - 1) + Math.random() * 400;
-    if (Date.now() + wait > deadline) break;
-
-    await discard(res);
-    await sleep(wait);
-    res = await callGeminiOnce(model, apiKey, base64, mimeType);
-  }
-
-  return res;
-}
-
 function stripDataUrl(value: string): string {
   const commaIndex = value.indexOf(',');
   if (value.startsWith('data:') && commaIndex !== -1) {
@@ -316,84 +165,44 @@ Deno.serve(async req => {
     return errorResponse('No Gemini API key configured. Set it in Settings or the GEMINI_API_KEY env var.', 500);
   }
 
-  // Leaves headroom under the platform's request timeout so the fallback
-  // message below is what the operator actually sees.
-  const deadline = Date.now() + REQUEST_BUDGET_MS;
-
-  // Collected so the reported failure names the real cause per model rather
-  // than whichever candidate happened to be tried last.
-  const failures: { model: string; status: number | null; reason: string }[] = [];
-
-  for (const model of MODEL_CANDIDATES) {
-    if (Date.now() > deadline) {
-      failures.push({ model, status: null, reason: 'skipped, request budget spent' });
-      break;
+  let text: string;
+  let model: string;
+  try {
+    const result = await generateContent(apiKey, {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: PROMPT },
+            { inline_data: { mime_type: mimeType, data: base64 } },
+          ],
+        },
+      ],
+      generationConfig: {
+        // Extraction, not creativity.
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: RESPONSE_SCHEMA,
+      },
+    }, { attemptsPerModel: ATTEMPTS_PER_MODEL, budgetMs: REQUEST_BUDGET_MS });
+    text = result.text;
+    model = result.model;
+  } catch (err) {
+    if (err instanceof GeminiError) {
+      return errorResponse(err.message, geminiHttpStatus(err), err.attempts.length ? { attempts: err.attempts } : {});
     }
-
-    let res: Response;
-    try {
-      res = await callGemini(model, apiKey, base64, mimeType, deadline);
-    } catch (err) {
-      failures.push({ model, status: null, reason: err instanceof Error ? err.message : String(err) });
-      continue;
-    }
-
-    if (res.status === 404) {
-      await discard(res);
-      failures.push({ model, status: 404, reason: 'not available for this API key' });
-      continue;
-    }
-
-    if (res.status === 429) {
-      await discard(res);
-      failures.push({ model, status: 429, reason: 'quota exhausted' });
-      continue;
-    }
-
-    if (RETRY_STATUSES.includes(res.status)) {
-      await discard(res);
-      failures.push({ model, status: res.status, reason: 'overloaded after retries' });
-      continue;
-    }
-
-    if (!res.ok) {
-      const detail = await res.text();
-      return errorResponse(`Gemini returned ${res.status}.`, 502, { detail: detail.slice(0, 800) });
-    }
-
-    const payload = await res.json();
-    const parts: GeminiPart[] = payload?.candidates?.[0]?.content?.parts ?? [];
-    const text = parts.map(p => p.text ?? '').join('').trim();
-
-    if (!text) {
-      const finishReason = payload?.candidates?.[0]?.finishReason ?? 'unknown';
-      return errorResponse(`Gemini returned no content (finishReason: ${finishReason}).`, 502);
-    }
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return errorResponse('Gemini returned malformed JSON.', 502, { raw: text.slice(0, 800) });
-    }
-
-    return jsonResponse({
-      ...parsed,
-      model_used: model,
-    });
+    return errorResponse(err instanceof Error ? err.message : String(err), 502);
   }
 
-  // Every candidate failed. Lead with the cause the admin can actually act on.
-  const allQuota = failures.length > 0 && failures.every(f => f.status === 429 || f.status === 404);
-  const anyQuota = failures.some(f => f.status === 429);
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return errorResponse('Gemini returned malformed JSON.', 502, { raw: text.slice(0, 800) });
+  }
 
-  const message = allQuota && anyQuota
-    ? 'Gemini quota is exhausted for today. This API key is on the free tier — enable billing on the Google AI Studio project, or try again tomorrow.'
-    : anyQuota
-      ? 'Gemini is out of quota on some models and overloaded on the rest. Try again in a few minutes.'
-      : 'Gemini is overloaded right now. Try again in a minute.';
-
-  return errorResponse(message, 502, {
-    attempts: failures.map(f => `${f.model}: ${f.status ?? 'network'} — ${f.reason}`),
+  return jsonResponse({
+    ...parsed,
+    model_used: model,
   });
 });

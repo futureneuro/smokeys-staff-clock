@@ -11,19 +11,20 @@ import StockCounts from './StockCounts';
 import WasteLog from './WasteLog';
 import AlertsPanel from './AlertsPanel';
 import PosSync from './PosSync';
+import MonthReport from './MonthReport';
 import { fetchPurchaseLines, fetchPurchases, fetchSalesEntries } from '@/lib/inventory-api';
 import { formatCop, formatQty } from '@/lib/inventory-units';
 import type { Purchase, PurchaseLine, SalesEntry as SalesEntryRow } from '@/lib/inventory-types';
 
-type InventoryTab = 'stock' | 'counts' | 'alerts' | 'purchases' | 'sales' | 'pos' | 'waste' | 'recipes' | 'items';
+type InventoryTab = 'stock' | 'report' | 'counts' | 'alerts' | 'purchases' | 'sales' | 'waste' | 'recipes' | 'items';
 
 const TAB_LABEL: Record<InventoryTab, string> = {
     stock: '📊 Stock',
+    report: '📈 Report',
     counts: '📋 Counts',
     alerts: '🔔 Alerts',
     purchases: '🧾 Purchases',
     sales: '🍽️ Sales',
-    pos: '🔗 POS',
     waste: '🗑️ Waste',
     recipes: '📖 Recipes',
     items: '📦 Items',
@@ -143,24 +144,30 @@ export default function InventoryPanel({ adminId }: { adminId: string }) {
             {savedNotice && <div style={iv.okBox}>{savedNotice}</div>}
 
             {tab === 'stock' && <StockOverview />}
+            {tab === 'report' && <MonthReport adminId={adminId} />}
             {tab === 'counts' && <StockCounts adminId={adminId} />}
             {tab === 'alerts' && <AlertsPanel adminId={adminId} />}
-            {tab === 'pos' && <PosSync adminId={adminId} />}
             {tab === 'waste' && <WasteLog adminId={adminId} />}
             {tab === 'recipes' && <MenuRecipes />}
             {tab === 'items' && <ItemCatalog />}
 
             {tab === 'sales' && (
                 <>
-                    <div style={iv.sectionHeader}>
+                    {/* The POS import is the normal path; typing a day in is the
+                        fallback for an outage, a correction, or before the POS key
+                        and mappings are in place. Both live here so there is one
+                        place to look for "what sold". */}
+                    <PosSync adminId={adminId} />
+
+                    <div style={{ ...iv.sectionHeader, marginTop: 8 }}>
                         <div>
-                            <h3 style={iv.sectionTitle}>Sales</h3>
+                            <h3 style={iv.sectionTitle}>Sales days on record</h3>
                             <p style={iv.hint}>
-                                Enter what was sold each day. The raw materials come off stock automatically —
-                                there is no POS connection.
+                                Every day that came off stock, imported or typed in. Type a day in when the POS
+                                could not import it — the raw materials come off stock the same way.
                             </p>
                         </div>
-                        <button style={iv.btn} onClick={() => setEnteringSales(true)}>+ Enter a day&apos;s sales</button>
+                        <button style={iv.btn} onClick={() => setEnteringSales(true)}>+ Type a day in</button>
                     </div>
 
                     {error && <div style={iv.errBox}>{error}</div>}
@@ -169,7 +176,7 @@ export default function InventoryPanel({ adminId }: { adminId: string }) {
                         <div style={iv.empty}>Loading…</div>
                     ) : salesEntries.length === 0 ? (
                         <div style={iv.empty}>
-                            No sales entered yet. Use <strong>Enter a day&apos;s sales</strong> to start.
+                            No sales days yet. Import one from the POS above, or <strong>Type a day in</strong>.
                         </div>
                     ) : (
                         <div style={iv.tableWrap}>
