@@ -6,23 +6,20 @@
 -- was held for mapping or failed, so a mapping confirmed during the day is
 -- applied the next morning without anyone pressing a button.
 --
--- Same pattern as the alert retry: the URL, the anon key (for the gateway's
--- JWT check) and the shared secret (proves the caller is the schedule) come
--- from database settings, so nothing secret is written into this file:
+-- The URL, the anon key (for the gateway's JWT check) and the shared secret
+-- (proves the caller is the schedule) are read from Supabase Vault at run
+-- time, so nothing secret is written into this file or into the job itself.
+-- Create them once, by name:
 --
---   alter database postgres set app.settings.pos_sync_url       = 'https://<ref>.supabase.co/functions/v1/olaclick-sync';
---   alter database postgres set app.settings.inventory_anon_key = '<anon key>';   -- already set for the alert retry
---   alter database postgres set app.settings.pos_sync_secret    = '<same value as the POS_SYNC_SECRET function env var>';
+--   pos_sync_url         https://<ref>.supabase.co/functions/v1/olaclick-sync
+--   inventory_anon_key   the project's anon key
+--   pos_sync_secret      the same value as the POS_SYNC_SECRET function env var
 --
--- Re-running this migration (or a later one calling the same block) picks up
--- changed settings: the job is unscheduled and recreated each time.
+-- `alter database ... set` was tried first and is not allowed for the postgres
+-- role on hosted projects, which is why the alert retry's settings-based
+-- schedule never actually ran.
 
 do $$
-declare
-    v_url    text := current_setting('app.settings.pos_sync_url', true);
-    v_anon   text := current_setting('app.settings.inventory_anon_key', true);
-    v_secret text := current_setting('app.settings.pos_sync_secret', true);
-    v_missing text[] := '{}';
 begin
     if to_regclass('cron.job') is null then
         raise notice 'pg_cron not installed — skipping the OlaClick daily sync schedule';
@@ -32,31 +29,24 @@ begin
     perform cron.unschedule('olaclick-daily-sync')
     where exists (select 1 from cron.job where jobname = 'olaclick-daily-sync');
 
-    if coalesce(btrim(v_url), '') = ''    then v_missing := v_missing || 'app.settings.pos_sync_url'; end if;
-    if coalesce(btrim(v_anon), '') = ''   then v_missing := v_missing || 'app.settings.inventory_anon_key'; end if;
-    if coalesce(btrim(v_secret), '') = '' then v_missing := v_missing || 'app.settings.pos_sync_secret'; end if;
-
-    if array_length(v_missing, 1) > 0 then
-        raise notice 'OlaClick daily sync not scheduled — missing: %', array_to_string(v_missing, ', ');
-        return;
-    end if;
-
     perform cron.schedule(
         'olaclick-daily-sync',
         '0 9 * * *',
-        format($cron$
+        $cron$
             select net.http_post(
-                url := %L,
+                url := (select decrypted_secret from vault.decrypted_secrets where name = 'pos_sync_url'),
                 headers := jsonb_build_object(
                     'Content-Type', 'application/json',
-                    'Authorization', 'Bearer ' || %L,
-                    'x-pos-sync-secret', %L
+                    'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'inventory_anon_key'),
+                    'x-pos-sync-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'pos_sync_secret')
                 ),
                 body := '{"action":"scheduled"}'::jsonb,
                 timeout_milliseconds := 55000
-            );
-        $cron$, v_url, v_anon, v_secret)
+            )
+            where (select count(*) from vault.decrypted_secrets
+                   where name in ('pos_sync_url', 'inventory_anon_key', 'pos_sync_secret')) = 3;
+        $cron$
     );
 
-    raise notice 'OlaClick daily sync scheduled for 04:00 Bogotá';
+    raise notice 'OlaClick daily sync scheduled for 04:00 Bogotá (runs once the three vault secrets exist)';
 end $$;
