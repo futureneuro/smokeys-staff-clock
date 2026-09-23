@@ -123,3 +123,12 @@ export interface PosSyncDayResult {
     not_deducted_count?: number;
     error?: string;
 }
+
+export interface PosSyncRangeResult {
+    from: string;
+    to: string;
+    results: PosSyncDayResult[];
+    done: boolean;
+    // Where to resume when the function ran out of time; null when done.
+    next_from: string | null;
+}

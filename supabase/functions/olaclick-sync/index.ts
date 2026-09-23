@@ -2,9 +2,15 @@
 //
 // Actions:
 //   sync        one finished day (default: yesterday in Bogotá)    admin or schedule
+//   sync_range  every day from `from` (default: the day after the   admin
+//               last day on record) up to `to` (default: yesterday)
 //   retry_held  re-run recent days that were held or failed        admin
 //   scheduled   yesterday, then retry held days                    schedule only
 //   suggest     ask Gemini to propose mappings for unmapped rows   admin
+//
+// Nothing runs on a timer: the manager presses Import, looks at what came
+// back, and confirms the matching. sync_range exists so catching up after a
+// week away is one press, not seven.
 //
 // The mapping decisions live in _shared/pos-mapping.ts. This file only fetches,
 // records, and hands confirmed days to inv_confirm_sales_entry — the same
@@ -374,6 +380,58 @@ async function retryHeld(supabase: Client, apiKey: string, trigger: Trigger, ski
   return results;
 }
 
+// A whole range in one press. Days run oldest first so the ledger fills in
+// order. The gateway cuts a request off at 60s and two OlaClick calls per day
+// take about a second, so this stops early and hands back `next_from`; the
+// screen calls again until `done`.
+const RANGE_BUDGET_MS = 45_000;
+const RANGE_MAX_DAYS = 366;
+
+interface RangeResult {
+  from: string;
+  to: string;
+  results: DayResult[];
+  done: boolean;
+  next_from: string | null;
+}
+
+async function lastDayOnRecord(supabase: Client): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('inv_pos_imports')
+    .select('sold_on')
+    .order('sold_on', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`Could not read the last imported day: ${error.message}`);
+  return (data as { sold_on: string } | null)?.sold_on ?? null;
+}
+
+async function syncRange(
+  supabase: Client,
+  apiKey: string,
+  from: string | null,
+  to: string,
+  trigger: Trigger,
+): Promise<RangeResult> {
+  const start = from ?? (await lastDayOnRecord(supabase).then(d => (d ? addDays(d, 1) : to)));
+  if (start > to) return { from: start, to, results: [], done: true, next_from: null };
+
+  const span = Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${start}T12:00:00Z`)) / 86_400_000) + 1;
+  if (span > RANGE_MAX_DAYS) throw new Error(`That is ${span} days. Import at most ${RANGE_MAX_DAYS} at a time.`);
+
+  const began = Date.now();
+  const results: DayResult[] = [];
+  let day = start;
+  while (day <= to) {
+    if (Date.now() - began > RANGE_BUDGET_MS) {
+      return { from: start, to, results, done: false, next_from: day };
+    }
+    results.push(await syncDay(supabase, apiKey, day, trigger));
+    day = addDays(day, 1);
+  }
+  return { from: start, to, results, done: true, next_from: null };
+}
+
 // ---------------------------------------------------------------------------
 // AI suggestions
 // ---------------------------------------------------------------------------
@@ -581,11 +639,14 @@ Deno.serve(async req => {
 
   // Which caller may use which action is settled before anything else, so a
   // refusal is never masked by a configuration error further down.
-  if (!['sync', 'retry_held', 'scheduled', 'suggest'].includes(action)) {
+  if (!['sync', 'sync_range', 'retry_held', 'scheduled', 'suggest'].includes(action)) {
     return errorResponse(`Unknown action "${action}".`, 400);
   }
   if (action === 'suggest' && !viaAdmin) {
     return errorResponse('Suggestions are requested from the POS screen.', 403);
+  }
+  if (action === 'sync_range' && !viaAdmin) {
+    return errorResponse('Range imports are started from the Sales screen.', 403);
   }
   if (action === 'scheduled' && !viaSchedule) {
     return errorResponse('This action is reserved for the daily schedule.', 403);
@@ -594,6 +655,16 @@ Deno.serve(async req => {
   try {
     if (action === 'suggest') {
       return jsonResponse(await suggest(supabase));
+    }
+
+    // Validated before the key check so a bad date is reported as a bad date,
+    // not as a server configuration problem.
+    const rangeTo = typeof body.to === 'string' && body.to ? body.to : null;
+    const rangeFrom = typeof body.from === 'string' && body.from ? body.from : null;
+    if (action === 'sync_range') {
+      if ((rangeTo !== null && !ISO_DATE_RE.test(rangeTo)) || (rangeFrom !== null && !ISO_DATE_RE.test(rangeFrom))) {
+        return errorResponse('from and to must be YYYY-MM-DD.', 400);
+      }
     }
 
     const apiKey = (Deno.env.get('OLACLICK_API_KEY') ?? '').trim();
@@ -612,6 +683,12 @@ Deno.serve(async req => {
 
     if (action === 'retry_held') {
       return jsonResponse({ results: await retryHeld(supabase, apiKey, trigger, new Set()) });
+    }
+
+    if (action === 'sync_range') {
+      const to = rangeTo ?? yesterday;
+      if (to > yesterday) return errorResponse(`${to} is not over yet in Bogotá. Only finished days can be imported.`, 400);
+      return jsonResponse(await syncRange(supabase, apiKey, rangeFrom, to, trigger));
     }
 
     if (action === 'sync') {

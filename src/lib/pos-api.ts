@@ -13,6 +13,7 @@ import type {
     PosProductKind,
     PosProductMap,
     PosSyncDayResult,
+    PosSyncRangeResult,
 } from './pos-types';
 
 const EDGE_BASE = process.env.NEXT_PUBLIC_INVENTORY_EDGE_URL || EDGE_FUNCTIONS_BASE_URL;
@@ -95,6 +96,35 @@ export async function syncPosDay(soldOn: string | null, adminId: string | null):
         admin_id: adminId,
     });
     return payload.results ?? [];
+}
+
+// from = null means "the day after the last day on record". The function
+// stops before the gateway timeout and returns next_from, so this loops until
+// it reports done, calling onProgress after each chunk.
+export async function syncPosRange(
+    from: string | null,
+    to: string | null,
+    adminId: string | null,
+    onProgress?: (soFar: PosSyncDayResult[], upTo: string) => void,
+): Promise<PosSyncRangeResult> {
+    const all: PosSyncDayResult[] = [];
+    let cursor = from;
+    let first: PosSyncRangeResult | null = null;
+    for (;;) {
+        const chunk = await callSync<PosSyncRangeResult>({
+            action: 'sync_range',
+            ...(cursor ? { from: cursor } : {}),
+            ...(to ? { to } : {}),
+            admin_id: adminId,
+        });
+        first ??= chunk;
+        all.push(...chunk.results);
+        onProgress?.(all, chunk.to);
+        if (chunk.done || !chunk.next_from) {
+            return { from: first.from, to: chunk.to, results: all, done: true, next_from: null };
+        }
+        cursor = chunk.next_from;
+    }
 }
 
 export async function retryHeldPosDays(adminId: string | null): Promise<PosSyncDayResult[]> {

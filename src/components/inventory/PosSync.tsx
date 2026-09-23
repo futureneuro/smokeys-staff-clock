@@ -10,7 +10,7 @@ import {
     fetchPosProductMaps,
     retryHeldPosDays,
     suggestPosMappings,
-    syncPosDay,
+    syncPosRange,
 } from '@/lib/pos-api';
 import { formatCop, getBogotaDateString } from '@/lib/inventory-units';
 import type { MenuItem } from '@/lib/inventory-types';
@@ -40,6 +40,28 @@ function yesterdayInBogota(): string {
     return d.toISOString().slice(0, 10);
 }
 
+function addDays(iso: string, days: number): string {
+    const d = new Date(`${iso}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + days);
+    return d.toISOString().slice(0, 10);
+}
+
+// One line for a whole range, then the days that need a look.
+function summarise(results: PosSyncDayResult[]): string {
+    if (results.length === 0) return 'Nothing to import — everything up to yesterday is already on record.';
+    const count = (s: PosImportStatus) => results.filter(r => r.status === s && !r.already).length;
+    const already = results.filter(r => r.already).length;
+    const parts: string[] = [];
+    if (count('confirmed')) parts.push(`${count('confirmed')} day(s) taken off stock`);
+    if (count('pending_mapping')) parts.push(`${count('pending_mapping')} held for matching`);
+    if (count('no_sales')) parts.push(`${count('no_sales')} with no sales`);
+    if (count('skipped_manual')) parts.push(`${count('skipped_manual')} already typed in by hand`);
+    if (count('failed')) parts.push(`${count('failed')} failed`);
+    if (already) parts.push(`${already} already imported`);
+    const failures = results.filter(r => r.status === 'failed' && r.error).map(r => `${r.sold_on}: ${r.error}`);
+    return `${results.length} day(s): ${parts.join(', ')}.${failures.length ? ` ${failures.join(' ')}` : ''}`;
+}
+
 function describe(results: PosSyncDayResult[]): string {
     if (results.length === 0) return 'Nothing to retry.';
     return results.map(r => {
@@ -62,8 +84,9 @@ export default function PosSync({ adminId }: { adminId: string }) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [notice, setNotice] = useState('');
-    const [busy, setBusy] = useState<'sync' | 'date' | 'retry' | 'suggest' | null>(null);
-    const [syncDate, setSyncDate] = useState(yesterdayInBogota());
+    const [busy, setBusy] = useState<'range' | 'retry' | 'suggest' | null>(null);
+    const [fromDate, setFromDate] = useState('');
+    const [progress, setProgress] = useState('');
     const [openDay, setOpenDay] = useState<string | null>(null);
 
     const load = useCallback(async () => {
@@ -101,10 +124,18 @@ export default function PosSync({ adminId }: { adminId: string }) {
         }
     }
 
+    // Default start: the day after the last day on record, so a press always
+    // continues where the previous one stopped. Editable for a first-time
+    // backfill or a re-import.
+    const lastOnRecord = imports.reduce<string | null>((max, i) => (max === null || i.sold_on > max ? i.sold_on : max), null);
+    const yesterday = yesterdayInBogota();
+    const defaultFrom = lastOnRecord ? addDays(lastOnRecord, 1) : yesterday;
+    const effectiveFrom = fromDate || defaultFrom;
+    const nothingToImport = effectiveFrom > yesterday;
+
     const pendingProducts = productMaps.filter(m => !m.confirmed).length;
     const pendingPieces = modifierMaps.filter(m => !m.confirmed).length;
     const heldDays = imports.filter(i => i.status === 'pending_mapping' || i.status === 'failed').length;
-    const today = getBogotaDateString();
 
     const insights = useMemo(() => {
         const pieces = new Map<string, number>();
@@ -133,41 +164,45 @@ export default function PosSync({ adminId }: { adminId: string }) {
                 <div>
                     <h3 style={iv.sectionTitle}>OlaClick POS</h3>
                     <p style={iv.hint}>
-                        Every morning at 4:00 the previous day&apos;s sales are pulled from OlaClick and taken off stock.
-                        A day only deducts once every product sold is matched — anything unrecognised holds the day
-                        rather than being skipped.
+                        Press Import to pull sales from OlaClick, from the last day on record up to yesterday.
+                        Nothing runs on its own. A day only deducts once every product sold is matched —
+                        anything unrecognised holds the day rather than being skipped.
                     </p>
                 </div>
             </div>
 
             <div style={{ ...iv.card, display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-                <button
-                    style={{ ...iv.btn, ...busyStyle('sync') }}
-                    disabled={busy !== null}
-                    onClick={() => run('sync', async () => describe(await syncPosDay(null, adminId || null)))}
-                >
-                    {busy === 'sync' ? 'Importing…' : 'Import yesterday'}
-                </button>
-
-                <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end' }}>
-                    <div style={iv.field}>
-                        <label style={iv.label}>OR A DAY</label>
-                        <input
-                            type="date"
-                            style={{ ...iv.input, width: 160 }}
-                            value={syncDate}
-                            max={yesterdayInBogota()}
-                            onChange={e => setSyncDate(e.target.value)}
-                        />
-                    </div>
-                    <button
-                        style={{ ...iv.btnGhost, ...busyStyle('date'), ...(!syncDate || syncDate >= today ? iv.btnDisabled : {}) }}
-                        disabled={busy !== null || !syncDate || syncDate >= today}
-                        onClick={() => run('date', async () => describe(await syncPosDay(syncDate, adminId || null)))}
-                    >
-                        {busy === 'date' ? 'Importing…' : 'Import'}
-                    </button>
+                <div style={iv.field}>
+                    <label style={iv.label}>IMPORT FROM</label>
+                    <input
+                        type="date"
+                        style={{ ...iv.input, width: 160 }}
+                        value={effectiveFrom}
+                        max={yesterday}
+                        onChange={e => setFromDate(e.target.value)}
+                    />
                 </div>
+                <div style={{ ...iv.hint, paddingBottom: 10 }}>to {yesterday}</div>
+                <button
+                    style={{ ...iv.btn, ...busyStyle('range'), ...(nothingToImport ? iv.btnDisabled : {}) }}
+                    disabled={busy !== null || nothingToImport}
+                    onClick={() => run('range', async () => {
+                        setProgress('');
+                        const r = await syncPosRange(
+                            effectiveFrom, null, adminId || null,
+                            (soFar, upTo) => setProgress(`${soFar.length} day(s) done, continuing to ${upTo}…`),
+                        );
+                        setProgress('');
+                        setFromDate('');
+                        return summarise(r.results);
+                    })}
+                >
+                    {busy === 'range' ? 'Importing…' : 'Import'}
+                </button>
+                {progress && <span style={iv.hint}>{progress}</span>}
+                {nothingToImport && !busy && (
+                    <span style={iv.hint}>Everything up to yesterday is on record.</span>
+                )}
 
                 <button
                     style={{ ...iv.btnGhost, ...busyStyle('retry'), ...(heldDays === 0 ? iv.btnDisabled : {}) }}
