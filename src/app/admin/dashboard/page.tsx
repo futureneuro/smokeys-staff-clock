@@ -3216,7 +3216,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     const [shiftFormMultiHint, setShiftFormMultiHint] = useState<string | null>(null);
     const [defaultBreaks, setDefaultBreaks] = useState<{ short: number[]; medium: number[]; long: number[] }>({ short: [15], medium: [30], long: [30, 30] });
     const [form, setForm] = useState({
-        name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427',
+        name: '', start_time: '', end_time: '', color: '#f0b427',
         shift_type: 'normal',
         shift_date: new Date().toISOString().slice(0, 10),
         staff_id: '',
@@ -3244,8 +3244,8 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     function handleTimeChange(field: 'start_time' | 'end_time', value: string) {
         const updatedForm = { ...form, [field]: value };
         
-        // Auto-apply defaults if creating a new shift
-        if (!editingShift) {
+        // Auto-apply break defaults only when both times are set (new shift template)
+        if (!editingShift && updatedForm.start_time.trim() && updatedForm.end_time.trim()) {
             const startMins = toMinutes(updatedForm.start_time);
             const endMins = toMinutes(updatedForm.end_time);
             const durationMins = endMins >= startMins ? endMins - startMins : (24 * 60 - startMins) + endMins;
@@ -3283,6 +3283,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         ignoreAssignmentId?: string,
         sourceAssignments: ShiftAssignment[] = assignments
     ): boolean {
+        if (!startTime.trim() || !endTime.trim()) return false;
         return sourceAssignments.some(assignment => {
             if (assignment.staff_id !== staffId) return false;
             if (assignment.shift_date !== date) return false;
@@ -3378,6 +3379,10 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
     async function saveShiftDef(e: React.FormEvent) {
         e.preventDefault();
         setFormError('');
+        if (!form.start_time.trim() || !form.end_time.trim()) {
+            setFormError('Please set start and end times for this shift.');
+            return;
+        }
         const isDefinitionEditMode = Boolean(editingShift && !editingAssignment);
         if (isDefinitionEditMode && Boolean(form.staff_id) !== Boolean(form.shift_date)) {
             setFormError('Select both a staff member and a date to add or update an assignment, or clear both to only update the shift template.');
@@ -3515,7 +3520,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         setEditingAssignment(null);
         setShiftFormMultiHint(null);
         setForm({
-            name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal',
+            name: '', start_time: '', end_time: '', color: '#f0b427', shift_type: 'normal',
             shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_slot_minutes: [60],
             early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30,
             block_outside_window: false, published: false
@@ -3568,7 +3573,7 @@ function ShiftsPanel({ staffList }: { staffList: Staff[] }) {
         setEditingShift(null);
         setEditingAssignment(null);
         setForm({
-            name: '', start_time: '09:00', end_time: '17:00', color: '#f0b427', shift_type: 'normal',
+            name: '', start_time: '', end_time: '', color: '#f0b427', shift_type: 'normal',
             shift_date: new Date().toISOString().slice(0, 10), staff_id: '', break_slot_minutes: [60],
             early_checkin_minutes: 15, late_grace_minutes: 10, early_checkout_minutes: 0, late_tolerance_minutes: 30,
             block_outside_window: false, published: false
